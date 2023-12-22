@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "pymutekiu"
+version = "0.1.0"
+description = "Python Besta RTOS userland emulator"
+authors = ["dogtopus <dogtopus@users.noreply.github.com>"]
+license = "MIT"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+unicorn = "^2.0.1.post1"
+pefile = "^2023.2.7"
+pygame = "^2.5.2"
+
+[tool.poetry.group.dev.dependencies]
+types-pefile = "^2023.2.7.post0"
+setuptools = "^69.0.2"
+ipython = "^8.18.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+start = 'pymutekiu.cli:main'
