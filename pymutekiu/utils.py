@@ -3,6 +3,8 @@ from typing import (
     Sequence,
     Literal,
     Optional,
+    TypeVar,
+    Generic,
     TYPE_CHECKING,
 )
 

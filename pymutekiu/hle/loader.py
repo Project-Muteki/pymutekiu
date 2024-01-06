@@ -5,7 +5,7 @@ from typing import (
 
 from weakref import ProxyType
 
-import dataclasses
+from dataclasses import dataclass
 import logging
 import pathlib
 
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 _logger = logging.getLogger('loader')
 
 
-@dataclasses.dataclass
+@dataclass
 class LoadedSection:
     '''
     Represent a section of a loaded module within the emulated memory space.
@@ -45,7 +45,7 @@ class LoadedSection:
         return self.addr, self.addr + self.size
 
 
-@dataclasses.dataclass
+@dataclass
 class LoadedModule:
     '''
     Represent a loaded module within the emulated memory space.
@@ -60,7 +60,7 @@ class LoadedModule:
         return self.addr, self.addr + self.size
 
 
-@dataclasses.dataclass
+@dataclass
 class MainModule:
     module: LoadedModule
     entry_point: int

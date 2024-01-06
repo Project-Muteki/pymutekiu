@@ -2,7 +2,10 @@ from typing import (
     Any,
     NamedTuple,
     Callable,
+    cast,
+    TYPE_CHECKING,
 )
+from weakref import ProxyType
 
 import logging
 
@@ -12,7 +15,11 @@ from ..utils import (
     parse_oabi_args,
     guest_type_to_regs,
 )
-from .states import OSStates
+from .errno import GuestOSError
+
+if TYPE_CHECKING:
+    from .states import OSStates
+
 
 from unicorn.arm_const import (
     UC_ARM_REG_R0,
@@ -37,12 +44,12 @@ _CB = SyscallCallback
 
 class SyscallHandler:
     _uc: Uc
-    _states: OSStates
+    _states: 'OSStates'
     _syscall_table: dict[int, SyscallCallback]
 
-    def __init__(self, uc: Uc, states: OSStates):
+    def __init__(self, uc: Uc, states: ProxyType['OSStates']):
         self._uc = uc
-        self._states = states
+        self._states = cast('OSStates', states)
         self._syscall_table = {
             0x10000: _CB(self._OSCreateThread, 'pointer', ['pointer', 'pointer', 'uint32', 'bool']),
             0x10119: _CB(self._GetCurrentPathA, 'pointer', []),
@@ -68,7 +75,7 @@ class SyscallHandler:
             self._uc.reg_write(UC_ARM_REG_PC, lr)
             return
 
-        syscall_ret = syscall_callback.callback(*parse_oabi_args(syscall_callback.arg_types, uc))
+        syscall_ret = syscall_callback.callback(*parse_oabi_args(syscall_callback.arg_types, self._uc))
 
         # HLE syscall finished. It's now safe to set pc.
         self._uc.reg_write(UC_ARM_REG_PC, lr)
@@ -87,7 +94,14 @@ class SyscallHandler:
 
 
     def _OSCreateThread(self, func: int, user_data: int, stack_size: int, defer_start: bool) -> int:
-        return 0
+        try:
+            thr = self._states.sched.new_thread(func, user_data, stack_size)
+            if not defer_start:
+                self._states.sched.schedule(thr)
+        except GuestOSError as err:
+            self._states.sched.set_errno(err.errno)
+            return 0
+        return thr
 
     def _GetCurrentPathA(self) -> int:
         return 0
