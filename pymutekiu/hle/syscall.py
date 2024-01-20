@@ -1,3 +1,4 @@
+import dataclasses
 from typing import (
     Any,
     NamedTuple,
@@ -29,6 +30,7 @@ from unicorn.arm_const import (
     UC_ARM_REG_PC,
 )
 from unicorn import Uc
+import wrapt
 
 _logger = logging.getLogger('syscall')
 
@@ -40,6 +42,24 @@ class SyscallCallback(NamedTuple):
 
 
 _CB = SyscallCallback
+
+
+@dataclasses.dataclass
+class SyscallDefinition:
+    num: int
+    ret: ArgumentType
+    args: ArgumentFormat
+
+    @wrapt.decorator()
+    def __call__(self, wrapped, instance, args, kwargs):
+        return wrapped(*args, **kwargs)
+
+
+syscalldef = SyscallDefinition
+
+
+class SyscallSubHandler:
+    ...
 
 
 class SyscallHandler:

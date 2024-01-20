@@ -24,3 +24,4 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
 start = 'pymutekiu.cli:main'
+tests = 'tests:run_all'
