@@ -12,6 +12,7 @@ unicorn = "^2.0.1.post1"
 pefile = "^2023.2.7"
 pygame = "^2.5.2"
 wrapt = "^1.16.0"
+construct = "^2.10.70"
 
 [tool.poetry.group.dev.dependencies]
 types-pefile = "^2023.2.7.post0"

@@ -1,25 +1,26 @@
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import weakref
 
-from . import (
-    threading,
-    loader,
-    heap,
-)
+from .threading import Scheduler
+from .loader import Loader
+from .heap import Heap
 
-from unicorn import Uc
+if TYPE_CHECKING:
+    from unicorn import Uc
 
 
 class OSStates:
-    _uc: Uc
-    sched: threading.Scheduler
-    loader: loader.Loader
-    heap: heap.Heap
+    _uc: 'Uc'
+    sched: Scheduler
+    loader: Loader
+    heap: Heap
 
-    def __init__(self, uc: Uc):
+    def __init__(self, uc: 'Uc'):
         self._uc = uc
-        self.sched = threading.Scheduler(self._uc, weakref.proxy(self))
-        self.loader = loader.Loader(self._uc, weakref.proxy(self))
+        # HACK: Cast away the ProxyType here. weakref.ProxyType[OSStates] for these components currently are typed
+        # simply as OSStates because typing spec does not yet allow object wrapping.
+        self.sched = Scheduler(self._uc, cast('OSStates', weakref.proxy(self)))
+        self.loader = Loader(self._uc, cast('OSStates', weakref.proxy(self)))
         # TODO allow user to change optional configs
-        self.heap = heap.Heap(self._uc, weakref.proxy(self), 2*1024*1024, 32*1024*1024)
+        self.heap = Heap(self._uc, cast('OSStates', weakref.proxy(self)), 2*1024*1024, 32*1024*1024)

@@ -1,5 +1,4 @@
 from typing import TYPE_CHECKING, Optional, cast
-from weakref import ProxyType
 
 import logging
 import struct
@@ -110,9 +109,9 @@ class Scheduler:
     _next_slot: int
     _slots: list[Optional[int]]
 
-    def __init__(self, uc: Uc, states: ProxyType['OSStates']):
+    def __init__(self, uc: Uc, states: 'OSStates'):
         self._uc = uc
-        self._states = cast('OSStates', states)
+        self._states = states
         self._stack_page_allocator = utils.MemPageTracker(self.STACK_LIMIT)
         self._jiffy_starts_at = 0
         self._slots = [None] * self.THREAD_TABLE_SIZE

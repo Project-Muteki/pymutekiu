@@ -1,6 +1,5 @@
 from typing import TYPE_CHECKING, Optional, cast, NamedTuple
 from collections.abc import Iterator
-from weakref import ProxyType
 
 import logging
 import struct
@@ -27,7 +26,7 @@ class Heap:
     HLE guest heap implementation.
     """
     _uc: Uc
-    _states: ProxyType['OSStates']
+    _states: 'OSStates'
     _min_alloc_unit: int
     _max_alloc: int
     _trace: bool
@@ -77,7 +76,7 @@ class Heap:
 
             return MemChunk.pack(prev_chunk, next_chunk | occupied)
 
-    def __init__(self, uc: Uc, states: ProxyType['OSStates'], min_alloc_unit: int, max_alloc: int, trace: bool = False):
+    def __init__(self, uc: Uc, states: 'OSStates', min_alloc_unit: int, max_alloc: int, trace: bool = False):
         self._uc = uc
         self._states = states
         self._min_alloc_unit = min_alloc_unit
@@ -95,10 +94,21 @@ class Heap:
         Map extra memory pages onto the heap.
         """
         self._uc.mem_map(self._heap_end, self._min_alloc_unit, UC_PROT_READ | UC_PROT_WRITE)
-        # TODO actually grow the heap by rewriting the chunk tail (using self._heap_tail)
+
         new_heap_end = self._heap_end + self._min_alloc_unit
-        new_heap_tail = self._heap_end - 8
-        ...
+        new_heap_tail = new_heap_end - 8
+
+        if self._heap_tail == 0:
+            # Unformatted heap, format it.
+            self._uc.mem_write(self._heap_base, struct.pack('<2I', 0, new_heap_tail))
+            self._uc.mem_write(new_heap_tail, struct.pack('<2I', self._heap_base, 0))
+        else:
+            # Update last real chunk and relocate the heap tail
+            tail_chunk = self._read_and_parse_chunk(self._heap_tail)
+            last_real_chunk = self._read_and_parse_chunk(tail_chunk.prev_chunk)
+
+            self._uc.mem_write(last_real_chunk.this_chunk, last_real_chunk.to_bytes(new_next_chunk=new_heap_tail))
+            self._uc.mem_write(new_heap_tail, tail_chunk.to_bytes())
 
         self._heap_end = new_heap_end
         self._heap_tail = new_heap_tail
@@ -140,7 +150,7 @@ class Heap:
                 continue
 
             if chunk.size >= actual_size:
-                leftover_chunk_offset = chunk.this_chunk + actual_size
+                leftover_chunk_offset = chunk.this_chunk + 8 + actual_size
                 other_chunk = self._read_and_parse_chunk(chunk.next_chunk)
 
                 # Update the chunk that got spliced. Next chunk will now be the newly created chunk made of leftover
@@ -209,6 +219,7 @@ class Heap:
         Free a previously allocated guest memory.
         :param addr: Guest pointer to allocated memory
         """
+        # TODO merge adjacent free chunks
         chunk_addr = addr - 8
         header = self._read_and_parse_chunk(chunk_addr)
         self._uc.mem_write(chunk_addr, header.to_bytes(new_occupied=False))

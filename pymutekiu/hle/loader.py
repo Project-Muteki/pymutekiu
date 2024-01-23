@@ -3,8 +3,6 @@ from typing import (
     TYPE_CHECKING,
 )
 
-from weakref import ProxyType
-
 from dataclasses import dataclass
 import logging
 import pathlib
@@ -69,12 +67,12 @@ class MainModule:
 class Loader:
     SHARED_MODULE_LOAD_BASE = 0x80000000
     _uc: Uc
-    _states: ProxyType['OSStates']
+    _states: 'OSStates'
     _modules: list[LoadedModule]
     _main_module: Optional[MainModule]
     _shared_module_load_offset: int
 
-    def __init__(self, uc: Uc, _states: ProxyType['OSStates']):
+    def __init__(self, uc: Uc, _states: 'OSStates'):
         self._uc = uc
         self._states = _states
         self._modules = []

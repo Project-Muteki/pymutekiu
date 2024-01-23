@@ -6,7 +6,6 @@ from typing import (
     cast,
     TYPE_CHECKING,
 )
-from weakref import ProxyType
 
 import logging
 
@@ -67,9 +66,9 @@ class SyscallHandler:
     _states: 'OSStates'
     _syscall_table: dict[int, SyscallCallback]
 
-    def __init__(self, uc: Uc, states: ProxyType['OSStates']):
+    def __init__(self, uc: Uc, states: 'OSStates'):
         self._uc = uc
-        self._states = cast('OSStates', states)
+        self._states = states
         self._syscall_table = {
             0x10000: _CB(self._OSCreateThread, 'pointer', ['pointer', 'pointer', 'uint32', 'bool']),
             0x10119: _CB(self._GetCurrentPathA, 'pointer', []),

@@ -8,7 +8,8 @@ if TYPE_CHECKING:
 
 class MockUnicornMemoryAccessor:
     """
-    Simple mock side effect for Uc.mem_read()
+    Simple mock side effect for Uc.mem_read().
+    This does not support more complex memory management. Use real Uc instead.
     """
     _parent: 'TestCase'
     _content: bytes
@@ -29,7 +30,7 @@ class MockUnicornMemoryAccessor:
 
 class MockUnicornRegAccessor:
     """
-    Simple mock side effect for Uc.reg_read()
+    Simple mock side effect for Uc.reg_read().
     """
     _parent: 'TestCase'
     _regs: dict[int, int]
