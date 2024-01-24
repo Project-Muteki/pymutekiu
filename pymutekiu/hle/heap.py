@@ -176,11 +176,11 @@ class Heap:
         _logger.error('Heap out of memory.')
         raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseKernel.SYS_OUT_OF_MEMORY)
 
-    def calloc(self, size: int, nmemb: int) -> int:
+    def calloc(self, nmemb: int, size: int) -> int:
         """
         Allocate and clear memory on guest heap.
-        :param size: Size of each member.
         :param nmemb: Size of memory in number of members.
+        :param size: Size of each member.
         :return: Guest pointer to allocated memory.
         """
         if size * nmemb >= 1 << 32:
@@ -204,7 +204,7 @@ class Heap:
             chunk_addr = addr - 8
             header = self._read_and_parse_chunk(chunk_addr)
             orig_data_size = min(header.size, size)
-            orig_data = self._uc.mem_read(addr, orig_data_size)
+            orig_data = bytes(self._uc.mem_read(addr, orig_data_size))
         else:
             orig_data = b''
 
@@ -216,10 +216,39 @@ class Heap:
 
     def free(self, addr: int) -> None:
         """
-        Free a previously allocated guest memory.
+        Free a previously allocated guest memory and merge adjacent free chunks.
         :param addr: Guest pointer to allocated memory
         """
-        # TODO merge adjacent free chunks
         chunk_addr = addr - 8
         header = self._read_and_parse_chunk(chunk_addr)
-        self._uc.mem_write(chunk_addr, header.to_bytes(new_occupied=False))
+        prev_chunk = self._read_and_parse_chunk(header.prev_chunk) if header.prev_chunk != 0 else None
+        next_chunk = self._read_and_parse_chunk(header.next_chunk) if header.next_chunk != 0 else None
+
+        new_prev_chunk = header.prev_chunk
+        new_chunk = header.this_chunk
+        new_next_chunk = header.next_chunk
+        chunk_layout_changed = False
+
+        if prev_chunk is not None and not prev_chunk.occupied:
+            # We need to overwrite previous chunk instead since it will be consumed
+            new_chunk = prev_chunk.this_chunk
+            chunk_layout_changed = True
+            # Previous chunk of the will-be current chunk is the previous chunk of the previous chunk
+            # (merging previous chunk into current chunk)
+            new_prev_chunk = prev_chunk.prev_chunk
+        if next_chunk is not None and not next_chunk.occupied:
+            # Next chunk of the will-be current chunk will be the next chunk of the next chunk
+            # (merging next chunk into current chunk)
+            new_next_chunk = next_chunk.next_chunk
+            chunk_layout_changed = True
+        self._uc.mem_write(new_chunk, header.to_bytes(
+            new_prev_chunk=new_prev_chunk,
+            new_next_chunk=new_next_chunk,
+            new_occupied=False,
+        ))
+        if chunk_layout_changed:
+            # Fix link on the next chunk
+            next_chunk = self._read_and_parse_chunk(new_next_chunk)
+            self._uc.mem_write(new_next_chunk, next_chunk.to_bytes(
+                new_prev_chunk=new_chunk,
+            ))

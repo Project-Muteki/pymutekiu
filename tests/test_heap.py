@@ -63,6 +63,16 @@ class HeapAllocFree(unittest.TestCase):
             msg='Inconsistent tail.',
         )
 
+    def test_heap_malloc_alignment(self):
+        """
+        Should align to 4 bytes if the allocation is not 4-byte aligned.
+        """
+        gptr = self._heap.malloc(10)
+        memchunk_new = gptr - 8
+        prev, next_occupied = struct.unpack('<2I', self._uc.mem_read(memchunk_new, 8))
+        next_ = next_occupied & 0xfffffffe
+        self.assertEqual(next_ - gptr, 12)
+
     def test_heap_free(self):
         """
         Should free previously allocated memory while maintaining the consistency of memory chunks.
@@ -79,3 +89,110 @@ class HeapAllocFree(unittest.TestCase):
             bytes(memchunk_tail), struct.pack('<2I', self._heap_base, 0),
             msg='Inconsistent tail.',
         )
+
+    def test_heap_free_island(self):
+        """
+        Should create an island.
+        """
+        self._uc.mem_write(
+            self._heap_base,
+            struct.pack('<2I', 0, (self._heap_base + 0x10) | 1),
+        )
+        self._uc.mem_write(
+            self._heap_base + 0x10,
+            struct.pack('<2I', self._heap_base, (self._heap_base + 0x20) | 1),
+        )
+        self._uc.mem_write(
+            self._heap_base + 0x20,
+            struct.pack('<2I', self._heap_base + 0x10, self._heap_tail | 1),
+        )
+        self._uc.mem_write(
+            self._heap_tail,
+            struct.pack('<2I', self._heap_base + 0x20, 0),
+        )
+
+        self._heap.free(self._heap_base + 0x10 + 8)
+
+        memchunks = (
+            bytes(self._uc.mem_read(self._heap_base, 8)),
+            bytes(self._uc.mem_read(self._heap_base + 0x10, 8)),
+            bytes(self._uc.mem_read(self._heap_base + 0x20, 8)),
+            bytes(self._uc.mem_read(self._heap_tail, 8)),
+        )
+        self.assertTupleEqual(
+            memchunks, (
+                struct.pack('<2I', 0, (self._heap_base + 0x10) | 1),
+                struct.pack('<2I', self._heap_base, (self._heap_base + 0x20)),
+                struct.pack('<2I', self._heap_base + 0x10, self._heap_tail | 1),
+                struct.pack('<2I', self._heap_base + 0x20, 0),
+            )
+        )
+
+    def test_heap_free_reverse_island(self):
+        """
+        Should merge the reverse island into a single free chunk.
+        """
+        self._uc.mem_write(
+            self._heap_base,
+            struct.pack('<2I', 0, (self._heap_base + 0x10)),
+        )
+        self._uc.mem_write(
+            self._heap_base + 0x10,
+            struct.pack('<2I', self._heap_base, (self._heap_base + 0x20) | 1),
+        )
+        self._uc.mem_write(
+            self._heap_base + 0x20,
+            struct.pack('<2I', self._heap_base + 0x10, self._heap_tail),
+        )
+        self._uc.mem_write(
+            self._heap_tail,
+            struct.pack('<2I', self._heap_base + 0x20, 0),
+        )
+
+        self._heap.free(self._heap_base + 0x10 + 8)
+
+        memchunks = (
+            bytes(self._uc.mem_read(self._heap_base, 8)),
+            bytes(self._uc.mem_read(self._heap_tail, 8)),
+        )
+        self.assertTupleEqual(
+            memchunks, (
+                struct.pack('<2I', 0, self._heap_tail),
+                struct.pack('<2I', self._heap_base, 0),
+            )
+        )
+
+    def test_realloc_shrink(self):
+        """
+        Should return a new allocation whose chunk size is at least the size after shrinkage.
+        """
+        gptr = self._heap.malloc(16)
+        gptr2 = self._heap.realloc(gptr, 8)
+
+        memchunk_new = gptr2 - 8
+        prev, next_occupied = struct.unpack('<2I', self._uc.mem_read(memchunk_new, 8))
+        next_ = next_occupied & 0xfffffffe
+        self.assertGreaterEqual(next_ - gptr2, 8)
+
+    def test_realloc_grow(self):
+        """
+        Should return a new allocation whose chunk size is at least the size after growth.
+        """
+        gptr = self._heap.malloc(16)
+        gptr2 = self._heap.realloc(gptr, 24)
+
+        memchunk_new = gptr2 - 8
+        prev, next_occupied = struct.unpack('<2I', self._uc.mem_read(memchunk_new, 8))
+        next_ = next_occupied & 0xfffffffe
+        self.assertGreaterEqual(next_ - gptr2, 24)
+
+    def test_calloc(self):
+        """
+        Should clear the allocated memory with 0.
+        """
+        fill_size = (self._heap_tail - (self._heap_base + 8))
+        self._uc.mem_write(self._heap_base + 8, b'\xff' * fill_size)
+
+        gptr = self._heap.calloc(16, 1)
+        mem = bytes(self._uc.mem_read(gptr, 16))
+        self.assertEqual(mem, b'\x00' * 16)
