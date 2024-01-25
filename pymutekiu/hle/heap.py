@@ -33,6 +33,7 @@ class Heap:
 
     _heap_base: int
     _heap_end: int
+    _heap_tail: int
 
     class _ParsedHeader(NamedTuple):
         """
@@ -77,6 +78,13 @@ class Heap:
             return MemChunk.pack(prev_chunk, next_chunk | occupied)
 
     def __init__(self, uc: Uc, states: 'OSStates', min_alloc_unit: int, max_alloc: int, trace: bool = False):
+        if min_alloc_unit % 4096 != 0:
+            _logger.warning("Minimum allocation unit is not aligned to page size. Padding to the nearest page.")
+            min_alloc_unit = utils.align(min_alloc_unit, 4096)
+        if max_alloc % 4096 != 0:
+            _logger.warning("Maximum allocation size is not aligned to page size. Padding to the nearest page.")
+            min_alloc_unit = utils.align(min_alloc_unit, 4096)
+
         self._uc = uc
         self._states = states
         self._min_alloc_unit = min_alloc_unit
@@ -93,9 +101,16 @@ class Heap:
         """
         Map extra memory pages onto the heap.
         """
-        self._uc.mem_map(self._heap_end, self._min_alloc_unit, UC_PROT_READ | UC_PROT_WRITE)
+        current_alloc = self._heap_end - self._heap_base
+        if self._max_alloc <= current_alloc:
+            _logger.error('Heap out of memory.')
+            raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseKernel.SYS_OUT_OF_MEMORY)
 
-        new_heap_end = self._heap_end + self._min_alloc_unit
+        alloc_unit = min(self._min_alloc_unit, self._max_alloc - current_alloc)
+
+        self._uc.mem_map(self._heap_end, alloc_unit, UC_PROT_READ | UC_PROT_WRITE)
+
+        new_heap_end = self._heap_end + alloc_unit
         new_heap_tail = new_heap_end - 8
 
         if self._heap_tail == 0:
@@ -138,6 +153,55 @@ class Heap:
             self._uc.mem_read(addr, 8),
         )
 
+    def _find_chunk(self, size: int) -> Iterator[Optional[int]]:
+        """
+        Keep retrying to find a free chunk indefinitely.
+        :param size: Size requested.
+        :return: An iterator that yields None when no allocation possible, or the address of the allocated chunk.
+        """
+        assert size % 4 == 0, 'Size must be multiple of 4.'
+        chunk = None
+        while True:
+            prev_tail = chunk.this_chunk if chunk is not None else None
+            for chunk in self._enumerate_chunk(prev_tail):
+                if chunk.occupied:
+                    continue
+
+                if chunk.size >= size:
+                    leftover_chunk_offset = chunk.this_chunk + 8 + size
+                    other_chunk = self._read_and_parse_chunk(chunk.next_chunk)
+
+                    # Update the chunk that got spliced. Next chunk will now be the newly created chunk made of leftover
+                    # space. Previous chunk stay unchanged.
+                    self._uc.mem_write(chunk.this_chunk, chunk.to_bytes(
+                        new_next_chunk=leftover_chunk_offset,
+                        new_occupied=True,
+                    ))
+                    # For the newly created chunk, previous chunk is the original chunk that got
+                    # spliced. Next chunk is unchanged (i.e. still the other chunk).
+                    self._uc.mem_write(leftover_chunk_offset, chunk.to_bytes(
+                        new_prev_chunk=chunk.this_chunk,
+                    ))
+                    # Link the other chunk to the newly created chunk.
+                    self._uc.mem_write(other_chunk.this_chunk, other_chunk.to_bytes(
+                        new_prev_chunk=leftover_chunk_offset,
+                    ))
+
+                    # Account for header
+                    yield chunk.this_chunk + 8
+            yield None
+
+    @property
+    def committed_pages(self) -> int:
+        return self._heap_end - self._heap_base
+
+    @property
+    def free_pages(self) -> int:
+        return self._max_alloc - (self._heap_end - self._heap_base)
+
+    def get_free_space(self) -> int:
+        return sum(c.size - 8 for c in self._enumerate_chunk() if not c.occupied) + self.free_pages
+
     def malloc(self, size: int) -> int:
         """
         Allocate memory on guest heap.
@@ -145,36 +209,14 @@ class Heap:
         :return: Guest pointer to allocated memory.
         """
         actual_size = utils.align(size, 4)
-        for chunk in self._enumerate_chunk():
-            if chunk.occupied:
-                continue
-
-            if chunk.size >= actual_size:
-                leftover_chunk_offset = chunk.this_chunk + 8 + actual_size
-                other_chunk = self._read_and_parse_chunk(chunk.next_chunk)
-
-                # Update the chunk that got spliced. Next chunk will now be the newly created chunk made of leftover
-                # space. Previous chunk stay unchanged.
-                self._uc.mem_write(chunk.this_chunk, chunk.to_bytes(
-                    new_next_chunk=leftover_chunk_offset,
-                    new_occupied=True,
-                ))
-                # For the newly created chunk, previous chunk is the original chunk that got
-                # spliced. Next chunk is unchanged (i.e. still the other chunk).
-                self._uc.mem_write(leftover_chunk_offset, chunk.to_bytes(
-                    new_prev_chunk=chunk.this_chunk,
-                ))
-                # Link the other chunk to the newly created chunk.
-                self._uc.mem_write(other_chunk.this_chunk, other_chunk.to_bytes(
-                    new_prev_chunk=leftover_chunk_offset,
-                ))
-
-                # Account for header
-                return chunk.this_chunk + 8
-
-        # TODO handle heap growth
-        _logger.error('Heap out of memory.')
-        raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseKernel.SYS_OUT_OF_MEMORY)
+        for allocated in self._find_chunk(actual_size):
+            if allocated is None:
+                # Not enough pages committed. Try to commit more pages before trying again.
+                self._grow()
+            else:
+                # Allocated.
+                return allocated
+        raise RuntimeError('_find_chunk terminates unexpectedly.')
 
     def calloc(self, nmemb: int, size: int) -> int:
         """
