@@ -101,12 +101,11 @@ class Heap:
         """
         Map extra memory pages onto the heap.
         """
-        current_alloc = self._heap_end - self._heap_base
-        if self._max_alloc <= current_alloc:
+        if self._max_alloc <= self.committed_pages:
             _logger.error('Heap out of memory.')
             raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseKernel.SYS_OUT_OF_MEMORY)
 
-        alloc_unit = min(self._min_alloc_unit, self._max_alloc - current_alloc)
+        alloc_unit = min(self._min_alloc_unit, self.free_pages)
 
         self._uc.mem_map(self._heap_end, alloc_unit, UC_PROT_READ | UC_PROT_WRITE)
 
@@ -193,13 +192,29 @@ class Heap:
 
     @property
     def committed_pages(self) -> int:
+        """
+        Number of committed pages.
+        :return: Number of committed pages.
+        """
         return self._heap_end - self._heap_base
 
     @property
     def free_pages(self) -> int:
+        """
+        Number of uncommitted pages.
+        :return: Number of uncommitted pages.
+        """
         return self._max_alloc - (self._heap_end - self._heap_base)
 
     def get_free_space(self) -> int:
+        """
+        Calculate unoccupied memory space.
+
+        This simply adds the size of all the unoccupied memory chunks (minus the header overhead) to estimate how much
+        memory is potentially allocatable on the heap. Note that if the heap is heavily fragmented, allocation may fail
+        even when the amount of free space reported here is more than the amount requested.
+        :return: Free space in bytes.
+        """
         return sum(c.size - 8 for c in self._enumerate_chunk() if not c.occupied) + self.free_pages
 
     def malloc(self, size: int) -> int:
