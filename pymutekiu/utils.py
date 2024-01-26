@@ -357,6 +357,10 @@ class OABIArgReader:
             self._variadic_base = self._candidate_id
 
     @property
+    def has_variadic(self) -> bool:
+        return self._variadic_base is not None
+
+    @property
     def fixed_args(self) -> tuple[Argument]:
         """
         Obtain fixed arguments.
@@ -385,6 +389,8 @@ class OABIArgReader:
         """
         Resets the variadic reader.
         """
+        if not self.has_variadic:
+            raise TypeError('Reader does not support variadic arguments.')
         self._candidate_id = self._variadic_base
 
 
