@@ -45,9 +45,9 @@ class LoadedSection:
 
 @dataclass
 class LoadedModule:
-    '''
+    """
     Represent a loaded module within the emulated memory space.
-    '''
+    """
     name: str
     addr: int
     size: int

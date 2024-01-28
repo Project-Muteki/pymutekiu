@@ -1,16 +1,23 @@
-import dataclasses
+"""
+ABI and memory page management utilities.
+"""
+
 from typing import (
     Sequence,
     Literal,
     Optional,
     TypeVar,
     Generic,
+    Callable,
+    Hashable,
+    Protocol,
     TYPE_CHECKING,
 )
 from collections.abc import Iterator
 
+import dataclasses
+import logging
 import struct
-import enum
 
 from unicorn.arm_const import (
     UC_ARM_REG_R0,
@@ -19,7 +26,12 @@ from unicorn.arm_const import (
     UC_ARM_REG_R3,
     UC_ARM_REG_SP,
 )
-from unicorn import Uc
+
+if TYPE_CHECKING:
+    from unicorn import Uc
+    from .hle.states import OSStates
+
+_logger_abi = logging.getLogger('abi')
 
 ArgumentType = Literal[
     'void', 'pointer',
@@ -203,6 +215,85 @@ class MemPageTracker:
             self._tail = chunk
 
 
+@dataclasses.dataclass
+class GuestCallback:
+    """
+    Guest callback wrapper.
+    """
+    callback: Callable[..., GuestScalarValue]
+    return_type: ArgumentType
+    arg_types: ArgumentFormat
+
+    def respond_to(self, uc: 'Uc'):
+        """
+        Respond to a Unicorn context requesting a callback.
+        :param uc: The Unicorn context.
+        :return:
+        """
+        reader = OABIArgReader(uc, self.arg_types)
+        if not reader.has_variadic:
+            syscall_ret = self.callback(*reader.fixed_args)
+        else:
+            syscall_ret = self.callback(*reader.fixed_args, reader)
+
+        # Convert and write return value.
+        if self.return_type != 'void':
+            # TODO handle composite type.
+            ret_regs = guest_type_to_regs(self.return_type, syscall_ret)
+            uc.reg_write(UC_ARM_REG_R0, ret_regs[0])
+            if len(ret_regs) >= 2:
+                uc.reg_write(UC_ARM_REG_R1, ret_regs[1])
+            if len(ret_regs) > 2:
+                _logger_abi.warning('syscall_ret_regs has leftover. This should not have happened.')
+
+
+_TKey = TypeVar('_TKey', bound=Hashable)
+
+
+class GuestModule(Protocol[_TKey]):
+    @property
+    def available_keys(self) -> set[_TKey]:
+        return set()
+
+    def process(self, key: _TKey) -> bool: ...
+
+
+class GuestRequestHandler(Generic[_TKey]):
+    _uc: 'Uc'
+    _states: 'OSStates'
+    _table: dict[_TKey, GuestModule[_TKey]]
+    _modules: list[GuestModule[_TKey]]
+
+    def __init__(self, uc: 'Uc', states: 'OSStates'):
+        self._uc = uc
+        self._states = states
+        self._table = {}
+        self._modules = []
+
+    def process_requests(self, req_key: _TKey) -> bool:
+        module = self._table.get(req_key)
+        if module is not None:
+            return module.process(req_key)
+        return False
+
+    def register_guest_module(self, module: GuestModule[_TKey]) -> int:
+        conflicting_keys = module.available_keys.intersection(self._table)
+        if len(conflicting_keys) != 0:
+            raise ValueError(f'Conflicting keys {repr(conflicting_keys)} present in module. Cannot register.')
+
+        self._modules.append(module)
+        for key in module.available_keys:
+            self._table[key] = module
+
+        return len(self._modules) - 1
+
+    def unregister_guest_module(self, module_index: int) -> None:
+        module = self._modules[module_index]
+        for key in module.available_keys:
+            del self._table[key]
+        del self._modules[module_index]
+
+
 def align(pos: int, blksize: int) -> int:
     """
     Align memory address to the right side.
@@ -291,15 +382,18 @@ def guest_type_to_regs(type_: ArgumentType, value: float | bool | None) -> tuple
 class OABIArgReader:
     """
     Parse Arm OABI call arguments.
+
+    APCS reference can be found here:
+    https://developer.arm.com/documentation/dui0041/c/ARM-Procedure-Call-Standard/About-the-ARM-Procedure-Call-Standard
     """
-    _uc: Uc
+    _uc: 'Uc'
     _fmt: ArgumentFormat
     _stack_base: int
     _candidate_id: int
     _variadic_base: Optional[int]
     _fixed_args: Optional[tuple[Argument]]
 
-    def __init__(self, uc: Uc, fmt: ArgumentFormat):
+    def __init__(self, uc: 'Uc', fmt: ArgumentFormat):
         """
         Create the object and parse fixed arguments.
         :param uc: Unicorn context.
@@ -392,37 +486,3 @@ class OABIArgReader:
         if not self.has_variadic:
             raise TypeError('Reader does not support variadic arguments.')
         self._candidate_id = self._variadic_base
-
-
-def parse_oabi_args(fmt: ArgumentFormat, uc: Uc) -> list[Argument]:
-    """
-    Parse OABI arguments into a dictionary of numbers. Pointers will be stored as integer addresses that can be passed
-    to Uc.read_mem() calls.
-    APCS reference can be found here:
-    https://developer.arm.com/documentation/dui0041/c/ARM-Procedure-Call-Standard/About-the-ARM-Procedure-Call-Standard
-    :param fmt: Argument formats list.
-    :param uc: Emulator context.
-    :return: A dictionary containing parsed results.
-    """
-    # TODO verify that it's working on values that are split between core register and stack
-    parsed_args: list[Argument] = []
-
-    stack_base = uc.reg_read(UC_ARM_REG_SP)
-    candidate_id = 0
-    for i, arg_type in enumerate(fmt):
-        if arg_type not in VALID_ARGUMENT_TYPES:
-            raise ValueError(f'Unknown argument type {repr(arg_type)} for argument {i}.')
-        arg_size = ARG_SIZES[arg_type]
-        candidates = bytearray()
-        while arg_size > 0:
-            if candidate_id < 4:
-                ncrn = ARM_ARG_REGISTERS[candidate_id]
-                candidates.extend(uc.reg_read(ncrn).to_bytes(4, 'little'))
-            else:
-                nsaa = stack_base + 4 * (candidate_id - 4)
-                candidates.extend(uc.mem_read(nsaa, 4))
-            arg_size -= 1
-            candidate_id += 1
-        parsed_args.append(guest_type_from_bytes(arg_type, candidates))
-
-    return parsed_args
