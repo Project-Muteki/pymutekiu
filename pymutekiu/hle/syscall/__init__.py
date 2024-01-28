@@ -7,7 +7,8 @@ import logging
 
 from ...utils import GuestRequestHandler
 from .common import SyscallModule
-from .heap import Memory
+
+from .memory import Memory
 from .threading import Threading
 
 if TYPE_CHECKING:
