@@ -13,3 +13,7 @@ class Threading(SyscallModule):
             self._states.sched.set_errno(err.errno)
             return 0
         return thr
+
+    @syscalldef(0x10008, 'void', ['int16'])
+    def OSSleep(self, millis: int):
+        self._states.sched.yield_from_sleep(millis)

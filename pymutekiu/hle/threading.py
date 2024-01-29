@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Optional, cast
 import logging
 import struct
 import time
+import heapq
 from dataclasses import dataclass, astuple, Field
 
 from unicorn import (
@@ -11,11 +12,30 @@ from unicorn import (
     UC_PROT_WRITE,
     UC_QUERY_TIMEOUT,
 )
+from unicorn.arm_const import (
+    UC_ARM_REG_APSR,
+    UC_ARM_REG_R0,
+    UC_ARM_REG_R1,
+    UC_ARM_REG_R2,
+    UC_ARM_REG_R3,
+    UC_ARM_REG_R4,
+    UC_ARM_REG_R5,
+    UC_ARM_REG_R6,
+    UC_ARM_REG_R7,
+    UC_ARM_REG_R8,
+    UC_ARM_REG_R9,
+    UC_ARM_REG_R10,
+    UC_ARM_REG_R11,
+    UC_ARM_REG_R12,
+    UC_ARM_REG_LR,
+    UC_ARM_REG_PC,
+)
 
 from .. import utils
 from .errno import GuestOSError, ErrnoNamespace, ErrnoCauseUser
 
 if TYPE_CHECKING:
+    from unicorn.unicorn import UcContext
     from .states import OSStates
 
 _logger = logging.getLogger('threading')
@@ -88,7 +108,67 @@ class ThreadDescriptor:
         self.slot = slot
         self.slot_low3b = slot & 0b111
         self.slot_high3b = (slot >> 3) & 0b111
-        # TODO do we need to set the mask?
+        self.slot_low3b_bit = 1 << self.slot_low3b
+        self.slot_high3b_bit = 1 << self.slot_high3b
+
+
+@dataclass
+class CPUContext:
+    """
+    Besta RTOS CPU context reader/writer.
+    """
+    apsr: int
+    r0: int
+    r1: int
+    r2: int
+    r3: int
+    r4: int
+    r5: int
+    r6: int
+    r7: int
+    r8: int
+    r9: int
+    r10: int
+    r11: int
+    r12: int
+    lr: int
+    pc: int
+
+    _CONTEXT_SEQ = (
+        UC_ARM_REG_APSR,
+        UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6,
+        UC_ARM_REG_R7, UC_ARM_REG_R8, UC_ARM_REG_R9, UC_ARM_REG_R10, UC_ARM_REG_R11, UC_ARM_REG_R12,
+        UC_ARM_REG_LR, UC_ARM_REG_PC,
+    )
+    _STRUCT = struct.Struct('<16I')
+
+    @classmethod
+    def sizeof(cls) -> int:
+        return cls._STRUCT.size
+
+    @classmethod
+    def from_emulator_context(cls, uc: 'Uc | UcContext'):
+        return cls(*map(uc.reg_read, cls._CONTEXT_SEQ))
+
+    @classmethod
+    def from_bytes(cls, b: bytes):
+        return cls(*cls._STRUCT.unpack(b))
+
+    @classmethod
+    def for_new_thread(cls, func: int, user_data: int, on_exit: int):
+        return cls(
+            apsr=0x13,
+            r0=user_data, r1=0, r2=0, r3=0, r4=0, r5=0, r6=0,
+            r7=0, r8=0, r9=0, r10=0, r11=0, r12=0,
+            lr=on_exit, pc=func,
+        )
+
+    def to_emulator_context(self, uc: 'Uc | UcContext'):
+        for reg, val in zip(self._CONTEXT_SEQ, astuple(self)):
+            uc.reg_write(reg, val)
+
+    def to_bytes(self):
+        return self._STRUCT.pack(*astuple(self))
 
 
 class Scheduler:
@@ -108,6 +188,7 @@ class Scheduler:
     _jiffy_starts_at: int
     _next_slot: int
     _slots: list[Optional[int]]
+    _queue: list[int]
 
     def __init__(self, uc: Uc, states: 'OSStates'):
         self._uc = uc
@@ -115,6 +196,7 @@ class Scheduler:
         self._stack_page_allocator = utils.MemPageTracker(self.STACK_LIMIT)
         self._jiffy_starts_at = 0
         self._slots = [None] * self.THREAD_TABLE_SIZE
+        self._queue = []
 
     def new_thread(self,
                    func: int,
@@ -137,9 +219,12 @@ class Scheduler:
         _logger.debug('Mapping stack memory pages @ %#010x, size %#x', stack_top, stack_size)
         self._uc.mem_map(stack_top, stack_size, UC_PROT_READ | UC_PROT_WRITE)
 
+        # Save initial CPU context to stack
+        context_offset = stack_bottom - CPUContext.sizeof()
+        context = CPUContext.for_new_thread(func, user_data, 0)
+        self._uc.mem_write(context_offset, context.to_bytes())
+
         # Allocate the thread descriptor on target heap.
-        # TODO keep at least head and tail of all threads created
-        # TODO save initial CPU context (r0=user_data, sp=stack_bottom - CPUContext.sizeof()) to stack
         thr_ptr = self._states.heap.malloc(ThreadDescriptor.sizeof())
         desc = ThreadDescriptor(
             thread_func_ptr=func,
@@ -149,6 +234,18 @@ class Scheduler:
         )
         desc.set_slot(slot)
         self._uc.mem_write(thr_ptr, desc.to_bytes())
+
+        # TODO keep at least head and tail of all threads created
+
+    def yield_from_sleep(self, jiffies: int):
+        """
+        Sets the sleep counter and request a yield from current thread immediately.
+        Returns immediately when requesting 0 jiffy.
+        :param jiffies: Number of jiffies to sleep.
+        """
+        #TODO
+        #desc = ThreadDescriptor.from_bytes(self._uc.mem_read(thr, ThreadDescriptor.sizeof()))
+        ...
 
     def set_errno(self, errno: int):
         """
