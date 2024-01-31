@@ -8,7 +8,7 @@ class Threading(SyscallModule):
         try:
             thr = self._states.sched.new_thread(func, user_data, stack_size)
             if not defer_start:
-                self._states.sched.schedule(thr)
+                self._states.sched.register(thr)
         except GuestOSError as err:
             self._states.sched.set_errno(err.errno)
             return 0
@@ -16,4 +16,4 @@ class Threading(SyscallModule):
 
     @syscalldef(0x10008, 'void', ['int16'])
     def OSSleep(self, millis: int):
-        self._states.sched.yield_from_sleep(millis)
+        self._states.sched.request_sleep(millis)

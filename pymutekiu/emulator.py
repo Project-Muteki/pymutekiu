@@ -83,6 +83,7 @@ class Process:
 
     STACK_BASE = 0xff000000
     MAGIC_EXIT = 0xfffffffc
+    MAGIC_EXIT_THREAD = 0xfffffff8
 
     def __init__(self, main_stack_size=0x8000, heap_size=0x2000000):
         self._uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
