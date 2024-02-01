@@ -130,10 +130,8 @@ class Process:
         self._uc.emu_stop()
 
     def _on_intr(self, _uc: Uc, vec: int, _user_data: Any):
-        # TODO generate a yield event
         if vec == 2: # SVC
-            #self._states.sched.yield_from_svc()
-            self._uc.emu_stop()
+            self._states.sched.yield_from_svc()
 
     def _emulator_loop(self):
         ...

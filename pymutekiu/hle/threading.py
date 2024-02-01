@@ -1,13 +1,13 @@
 import enum
 import functools
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, Optional, Sequence
 
 import logging
 import struct
 import time
 import math
 
-from dataclasses import dataclass, astuple, Field
+from dataclasses import dataclass, astuple
 
 from unicorn import (
     Uc,
@@ -16,7 +16,7 @@ from unicorn import (
     UC_QUERY_TIMEOUT,
 )
 from unicorn.arm_const import (
-    UC_ARM_REG_APSR,
+    UC_ARM_REG_CPSR,
     UC_ARM_REG_R0,
     UC_ARM_REG_R1,
     UC_ARM_REG_R2,
@@ -43,6 +43,16 @@ if TYPE_CHECKING:
     from .states import OSStates
 
 _logger = logging.getLogger('threading')
+
+
+class ThreadWaitReason(enum.IntFlag):
+    NONE = 0x0
+    SEMAPHORE = 0x1
+    EVENT = 0x2
+    QUEUE = 0x4
+    SUSPEND = 0x8
+    CRITICAL_SECTION = 0x10
+    SLEEP = 0x20
 
 
 @dataclass
@@ -77,9 +87,9 @@ class ThreadDescriptor:
     "Lower 3 bit of slot number."
     slot_high3b: int = 0
     "Higher 3 bit of slot number."
-    slot_low3b_bit: int = 0b111
+    slot_low3b_bit: int = 0b000
     "Lower 3 bit bitmask of slot number."
-    slot_high3b_bit: int = 0b111
+    slot_high3b_bit: int = 0b000
     "Higher 3 bit bitmask of slot number."
     event: int = 0
     "Pointer to event descriptor that belongs to the event the thread is currently waiting for."
@@ -90,7 +100,7 @@ class ThreadDescriptor:
     unk_0x34: bytes = b'\x00' * 0x20
     "Unknown and seems to be uninitialized."
 
-    _STRUCT = struct.Struct('<iIIiiIIhHhh4bI2I20s')
+    _STRUCT = struct.Struct('<iIIiiIIhHhh4bI2I32s')
 
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ThreadDescriptor':
@@ -121,7 +131,7 @@ class CPUContext:
     """
     Besta RTOS CPU context reader/writer.
     """
-    apsr: int
+    cpsr: int
     r0: int
     r1: int
     r2: int
@@ -139,7 +149,7 @@ class CPUContext:
     pc: int
 
     _CONTEXT_SEQ = (
-        UC_ARM_REG_APSR,
+        UC_ARM_REG_CPSR,
         UC_ARM_REG_R0, UC_ARM_REG_R1, UC_ARM_REG_R2, UC_ARM_REG_R3, UC_ARM_REG_R4, UC_ARM_REG_R5, UC_ARM_REG_R6,
         UC_ARM_REG_R7, UC_ARM_REG_R8, UC_ARM_REG_R9, UC_ARM_REG_R10, UC_ARM_REG_R11, UC_ARM_REG_R12,
         UC_ARM_REG_LR, UC_ARM_REG_PC,
@@ -161,7 +171,7 @@ class CPUContext:
     @classmethod
     def for_new_thread(cls, func: int, user_data: int, on_exit: int):
         return cls(
-            apsr=0x13,
+            cpsr=0x13,
             r0=user_data, r1=0, r2=0, r3=0, r4=0, r5=0, r6=0,
             r7=0, r8=0, r9=0, r10=0, r11=0, r12=0,
             lr=on_exit, pc=func,
@@ -175,7 +185,7 @@ class CPUContext:
         return self._STRUCT.pack(*astuple(self))
 
 
-@functools.lru_cache()
+@functools.cache
 def _bcs(n: int) -> int:
     """
     Return the index of the first bit 1 (counting from LSB) aka the binary carry sequence.
@@ -190,27 +200,30 @@ def _bcs(n: int) -> int:
 
 class MaskTable:
     """
-    Parametric uC-OS2 mask table implementation.
+    Parametric uC/OS-II mask table implementation.
 
     Note that while this supports x and y size > 8 therefore allowing more than 64 active threads, doing so will break
     the threading ABI.
     """
+    _first_unmasked_table: Sequence[int]
+    _xshift: int
+    _xmask: int
+    _y: int
+    _x: bytearray
 
     def __init__(self, xsize: int = 8, ysize: int = 8):
         bcs_size = 2 ** max(xsize, ysize)
-        self._first_unmasked_table = tuple(_bcs(n) for n in bcs_size)
+        self._first_unmasked_table = tuple(_bcs(n) for n in range(bcs_size))
 
         self._xshift = math.ceil(math.log2(xsize))
-        self._yshift = math.ceil(math.log2(ysize))
         self._xmask = (1 << self._xshift) - 1
-        self._ymask = (1 << self._yshift) - 1
 
         self._y = 0
         self._x = bytearray(xsize)
 
-    def mask(self, slot_or_x: int, y: Optional[int] = None) -> tuple[int, int]:
+    def unmask(self, slot_or_x: int, y: Optional[int] = None) -> tuple[int, int]:
         """
-        Mask a specific slot (set the bit) in the table.
+        Unmask a specific slot (clear the bit) in the table.
         :param slot_or_x: Slot number or the x (LSB) part of the slot number.
         :param y: Either None, or the y (MSB) part of the slot number.
         :return: The slot's (x, y) value as a tuple.
@@ -226,9 +239,9 @@ class MaskTable:
 
         return x, y
 
-    def unmask(self, slot_or_x: int, y: Optional[int] = None) -> tuple[int, int]:
+    def mask(self, slot_or_x: int, y: Optional[int] = None) -> tuple[int, int]:
         """
-        Unmask a specific slot (clear the bit) in the table.
+        Mask a specific slot (set the bit) in the table.
         :param slot_or_x: Slot number or the x (LSB) part of the slot number.
         :param y: Either None, or the y (MSB) part of the slot number.
         :return: The slot's (x, y) value as a tuple.
@@ -245,6 +258,20 @@ class MaskTable:
 
         return x, y
 
+    def get(self, slot_or_x: int, y: Optional[int] = None) -> bool:
+        """
+        Get the current status of a slot.
+        :param slot_or_x: Slot number or the x (LSB) part of the slot number.
+        :param y: Either None, or the y (MSB) part of the slot number.
+        :return: True if the slot is unmasked (bit set), False otherwise.
+        """
+        if y is None:
+            y = slot_or_x >> self._xshift
+            x = slot_or_x & self._xmask
+        else:
+            x = slot_or_x
+        return bool((self._x[y] >> x) & 1)
+
     def first_unmasked(self) -> int:
         """
         Query and return the first unmasked slot (offset of the first cleared bit).
@@ -257,15 +284,15 @@ class MaskTable:
 
 class YieldReason(enum.Enum):
     TIMEOUT = enum.auto()
-    SYSCALL = enum.auto()
-    WAIT = enum.auto()
+    REQUEST_SYSCALL = enum.auto()
+    REQUEST_HLE_FUNC = enum.auto()
 
 
 class Scheduler:
     """
     The thread scheduler and handler class.
 
-    This is very similar to what uC/OS-II scheduler would do since Besta RTOS uses a modified uC/OS-II kernel.
+    This behaves very similarly to uC/OS-II scheduler since Besta RTOS uses a modified uC/OS-II kernel.
     """
     JIFFY_TARGET_US = 1000
 
@@ -288,6 +315,7 @@ class Scheduler:
     _slots: list[Optional[int]]
     _masks: MaskTable
     _yield_reason: Optional[YieldReason]
+    _yield_request_num: Optional[int]
 
     def __init__(self, uc: Uc, states: 'OSStates'):
         self._uc = uc
@@ -303,6 +331,7 @@ class Scheduler:
         self._masks = MaskTable()
 
         self._yield_reason = None
+        self._yield_request_num = None
 
     def find_empty_normal_slot(self) -> int:
         """
@@ -315,7 +344,7 @@ class Scheduler:
                 slot_found = slot
                 break
         if slot_found is None:
-            raise RuntimeError('No empty slot available.')
+            raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseUser.THREADING_SLOT_FULL)
         return slot_found
 
     def new_thread(self,
@@ -323,6 +352,7 @@ class Scheduler:
                    user_data: Optional[int] = None,
                    stack_size: int = 0x8000,
                    slot: Optional[int] = None):
+        # TODO more robust error handling
         if stack_size % 4096 != 0:
             _logger.warning('Stack size is not a multiple of minimum page size.')
             stack_size = utils.align(stack_size, 4096)
@@ -346,17 +376,15 @@ class Scheduler:
         self._uc.mem_write(context_offset, context.to_bytes())
 
         # Allocate the thread descriptor on target heap.
+        # TODO keep at least head and tail of all threads created
         thr_ptr = self._states.heap.malloc(ThreadDescriptor.sizeof())
         desc = ThreadDescriptor(
             thread_func_ptr=func,
             stack=stack_top,
             sp=stack_bottom,
-            #prev=..., next=...,
         )
         desc.set_slot(slot)
         self._uc.mem_write(thr_ptr, desc.to_bytes())
-
-        # TODO keep at least head and tail of all threads created
 
     def read_thread_descriptor(self, addr: int) -> ThreadDescriptor:
         return ThreadDescriptor.from_bytes(self._uc.mem_read(addr, ThreadDescriptor.sizeof()))
@@ -433,7 +461,19 @@ class Scheduler:
         """
         Trigger a yield due to incoming SVC call.
         """
-        self._yield_reason = YieldReason.SYSCALL
+        svc_offset = self._uc.reg_read(UC_ARM_REG_PC) - 4
+        syscall_no = int.from_bytes(self._uc.mem_read(svc_offset, 4), 'little') & 0xffffff
+
+        # Recover from syscall state to prepare for returning
+        sp = self._uc.reg_read(UC_ARM_REG_SP)
+        lr = int.from_bytes(self._uc.mem_read(sp, 4), 'little')
+        r0 = int.from_bytes(self._uc.mem_read(sp + 4, 4), 'little')
+        self._uc.reg_write(UC_ARM_REG_SP, sp + 8)
+        self._uc.reg_write(UC_ARM_REG_LR, lr)
+        self._uc.reg_write(UC_ARM_REG_R0, r0)
+
+        self._yield_reason = YieldReason.REQUEST_SYSCALL
+        self._yield_request_num = syscall_no
         self._uc.emu_stop()
 
     def new_scheduler_tick(self):
@@ -443,10 +483,12 @@ class Scheduler:
         self._sched_tick_starts_at = time.monotonic_ns()
         self._is_new_sched_tick = True
 
-    def request_sleep(self, jiffies: int):
+    def request_sleep_from_syscall(self, jiffies: int):
         """
-        Sets the sleep counter and reset the scheduler tick start timestamp.
-        Returns immediately when requesting 0 jiffy.
+        Sets the sleep counter and reset the scheduler tick start timestamp. Returns immediately when requesting 0
+        jiffy.
+
+        This method should be called in a syscall handler.
         :param jiffies: Number of jiffies to sleep.
         """
         if jiffies == 0:
@@ -457,8 +499,6 @@ class Scheduler:
         desc = self.read_thread_descriptor(self._slots[self._current_slot])
         desc.sleep_counter = jiffies
         self.new_scheduler_tick()
-
-        self._yield_reason = YieldReason.WAIT
 
         # Rescheduling will happen on the next scheduler tick since we process syscalls after the yield and before the
         # next tick.
@@ -480,10 +520,14 @@ class Scheduler:
             desc = self.read_thread_descriptor(thr)
             assert desc.slot == slot, 'Slot number inconsistent. Possible corruption.'
 
-            if desc.sleep_counter > 0:
+            # Update sleep counter
+            if desc.wait_reason & ThreadWaitReason.SLEEP:
                 desc.sleep_counter -= 1
-            # TODO do we need to check further than just wait reason for some threads that are waiting?
-            if desc.sleep_counter == 0 and desc.wait_reason == 0:
+                if desc.sleep_counter <= 0:
+                    desc.sleep_counter = 0
+                    desc.wait_reason &= ~ThreadWaitReason.SLEEP
+
+            if desc.wait_reason == ThreadWaitReason.NONE:
                 self._masks.unmask(slot)
 
     def tick(self) -> None:
@@ -491,7 +535,7 @@ class Scheduler:
         Attempt to run the scheduler for a single jiffy. May return during an actual scheduler tick i.e. before the
         jiffy expires.
 
-        This method should be called in the main loop before the syscall handler.
+        This method should be periodically called in the main loop before calling the syscall handler.
         """
         # Run housekeeping
         self._before_tick()
