@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "pymutekiu"
 version = "0.1.0"
-description = "Python Besta RTOS userland emulator"
+description = "Besta RTOS userland emulator"
 authors = ["dogtopus <dogtopus@users.noreply.github.com>"]
 license = "MIT"
 readme = "README.md"
