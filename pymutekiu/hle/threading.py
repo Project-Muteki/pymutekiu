@@ -313,7 +313,7 @@ class Scheduler:
     _states: 'OSStates'
     _stack_page_allocator: utils.MemPageTracker
     _sched_tick_starts_at: int
-    _is_new_sched_tick: bool
+    _reschedule: bool
     _current_slot: Optional[int]
     _slots: list[Optional[int]]
     _masks: MaskTable
@@ -327,7 +327,7 @@ class Scheduler:
         self._stack_page_allocator = utils.MemPageTracker(self.STACK_LIMIT)
 
         self._sched_tick_starts_at = 0
-        self._is_new_sched_tick = True
+        self._reschedule = True
 
         self._current_slot = None
         self._slots = [None] * self.THREAD_TABLE_SIZE
@@ -390,12 +390,15 @@ class Scheduler:
             sp=context_offset,
         )
         desc.set_slot(slot)
-        self._uc.mem_write(thr_ptr, desc.to_bytes())
+        self.write_thread_descriptor(thr_ptr, desc)
 
         return thr_ptr
 
     def read_thread_descriptor(self, addr: int) -> ThreadDescriptor:
         return ThreadDescriptor.from_bytes(self._uc.mem_read(addr, ThreadDescriptor.sizeof()))
+
+    def write_thread_descriptor(self, addr: int, desc: ThreadDescriptor) -> None:
+        self._uc.mem_write(addr, desc.to_bytes())
 
     def get_slot(self, slot: int) -> Optional[int]:
         """
@@ -461,6 +464,45 @@ class Scheduler:
         desc = self.read_thread_descriptor(self._slots[self._current_slot])
         return desc.kerrno
 
+    def save_context(self, slot: Optional[int] = None) -> None:
+        """
+        Switch out from a thread by saving current context to it.
+        :param slot: Force the slot number. Uses the current running slot when left unset.
+        """
+        if slot is None:
+            slot = self._slots[self._current_slot]
+
+        # Read the current thread descriptor
+        desc_from = self.read_thread_descriptor(slot)
+
+        # Save the context to the stack
+        ctx = CPUContext.from_emulator_context(self._uc)
+        sp = self._uc.reg_read(UC_ARM_REG_SP) - CPUContext.sizeof()
+        self._uc.mem_write(sp, ctx.to_bytes())
+        desc_from.sp = sp
+
+        # Commit the descriptor change
+        self.write_thread_descriptor(slot, desc_from)
+
+    def load_context(self, slot: int) -> None:
+        """
+        Restore context from a thread descriptor registered to a specific slot.
+        :param slot: Slot number.
+        """
+        # Read the target thread descriptor
+        desc_to = self.read_thread_descriptor(self._slots[slot])
+        assert desc_to.slot == slot
+
+        # Restore saved context
+        ctx = CPUContext.from_bytes(self._uc.mem_read(desc_to.sp, CPUContext.sizeof()))
+        ctx.to_emulator_context(self._uc)
+        # Restore SP
+        sp = desc_to.sp + CPUContext.sizeof()
+        self._uc.reg_write(UC_ARM_REG_SP, sp)
+
+        # Context switch to the target thread
+        self._current_slot = slot
+
     def switch(self, slot: Optional[int] = None) -> bool:
         """
         Perform a context switch when needed.
@@ -478,17 +520,8 @@ class Scheduler:
             return False
 
         if self._current_slot is not None:
-            # Save context to current thread
-            desc_from = self.read_thread_descriptor(self._slots[self._current_slot])
-            ctx = CPUContext.from_emulator_context(self._uc)
-            sp = self._uc.reg_read(UC_ARM_REG_SP) - CPUContext.sizeof()
-            self._uc.mem_write(sp, ctx.to_bytes())
-            desc_from.sp = sp
-
-        # Context switch to the target thread
-        desc_to = self.read_thread_descriptor(self._slots[slot])
-        ctx = CPUContext.from_bytes(self._uc.mem_read(desc_to.sp, CPUContext.sizeof()))
-        ctx.to_emulator_context(self._uc)
+            self.save_context()
+        self.load_context(slot)
 
         return True
 
@@ -511,12 +544,12 @@ class Scheduler:
         self._yield_request_num = syscall_no
         self._uc.emu_stop()
 
-    def new_scheduler_tick(self):
+    def signal_reschedule(self):
         """
         Generate a new scheduler tick by resetting the scheduler tick timestamp.
         """
         self._sched_tick_starts_at = time.monotonic_ns()
-        self._is_new_sched_tick = True
+        self._reschedule = True
 
     def request_sleep_from_syscall(self, jiffies: int):
         """
@@ -532,20 +565,23 @@ class Scheduler:
         # Mask the current thread and update the sleep counter
         self._masks.mask(self._current_slot)
         desc = self.read_thread_descriptor(self._slots[self._current_slot])
+        desc.wait_reason |= ThreadWaitReason.SLEEP
         desc.sleep_counter = jiffies
-        self.new_scheduler_tick()
+        self.write_thread_descriptor(self._slots[self._current_slot], desc)
 
-        # Rescheduling will happen on the next scheduler tick since we process syscalls after the yield and before the
-        # next tick.
+        # Signal the scheduler to start a new scheduler tick.
+        # Actual rescheduling will happen on the next scheduler tick since we process syscalls after the yield and
+        # before the next tick.
+        self.signal_reschedule()
 
     def _before_tick(self):
         """
         Housekeeping method that runs immediately when Scheduler.tick() was called.
         """
         # Do nothing when a scheduler tick is not yet expired.
-        if self._is_new_sched_tick:
+        if not self._reschedule:
             return
-        self._is_new_sched_tick = False
+        self._reschedule = False
 
         # TODO change this to do a linked list traversal
         for slot, thr in enumerate(self._slots):
@@ -561,6 +597,7 @@ class Scheduler:
                 if desc.sleep_counter <= 0:
                     desc.sleep_counter = 0
                     desc.wait_reason &= ~ThreadWaitReason.SLEEP
+                self.write_thread_descriptor(thr, desc)
 
             if desc.wait_reason == ThreadWaitReason.NONE:
                 self._masks.unmask(slot)
@@ -589,4 +626,4 @@ class Scheduler:
         # Check reason of yield. If it's timeout, update tick start timestamp and run another
         if remaining_time <= 0 and self._uc.query(UC_QUERY_TIMEOUT) == 1:
             self._yield_reason = YieldReason.TIMEOUT
-            self.new_scheduler_tick()
+            self.signal_reschedule()
