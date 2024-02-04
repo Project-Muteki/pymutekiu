@@ -26,9 +26,9 @@ _logger = logging.getLogger('loader')
 
 @dataclass
 class LoadedSection:
-    '''
+    """
     Represent a section of a loaded module within the emulated memory space.
-    '''
+    """
     name: str
     addr: int
     size: int

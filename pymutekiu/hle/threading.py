@@ -11,6 +11,7 @@ from dataclasses import dataclass, astuple
 
 from unicorn import (
     Uc,
+    UC_PROT_NONE,
     UC_PROT_READ,
     UC_PROT_WRITE,
     UC_QUERY_TIMEOUT,
@@ -298,6 +299,8 @@ class Scheduler:
 
     STACK_BASE = 0xff000000
     STACK_LIMIT = 8*1024*1024
+    STACK_GUARD_SIZE = 4096
+
     HIGH_PRIO_CUTOFF = 8
     LOW_PRIO_CUTOFF = 46
     THREAD_TABLE_SIZE = 64
@@ -351,8 +354,8 @@ class Scheduler:
                    func: int,
                    user_data: Optional[int] = None,
                    stack_size: int = 0x8000,
-                   slot: Optional[int] = None):
-        # TODO more robust error handling
+                   slot: Optional[int] = None) -> int:
+        # TODO more robust error handling (i.e. free already allocated resources before raising exceptions)
         if stack_size % 4096 != 0:
             _logger.warning('Stack size is not a multiple of minimum page size.')
             stack_size = utils.align(stack_size, 4096)
@@ -362,17 +365,20 @@ class Scheduler:
             slot = self.find_empty_normal_slot()
 
         # Allocate thread stack on target memory
-        # Add extra 1 page as guard page. This page will be unmapped and will only be seen by the allocator.
-        page_offset = self._stack_page_allocator.add(stack_size + 4096)
+        # Add extra 1 page as guard page. This page will be mapped as protected.
+        page_offset = self._stack_page_allocator.add(stack_size + self.STACK_GUARD_SIZE)
         stack_bottom = self.STACK_BASE - page_offset
         stack_top = stack_bottom - stack_size
+        stack_guard_top = stack_top - self.STACK_GUARD_SIZE
         _logger.debug('Mapping stack memory pages @ %#010x, size %#x', stack_top, stack_size)
         self._uc.mem_map(stack_top, stack_size, UC_PROT_READ | UC_PROT_WRITE)
+        _logger.debug('Mapping stack guard pages @ %#010x, size %#x', stack_guard_top, self.STACK_GUARD_SIZE)
+        self._uc.mem_map(stack_guard_top, self.STACK_GUARD_SIZE, UC_PROT_NONE)
 
         # Save initial CPU context to stack
         context_offset = stack_bottom - CPUContext.sizeof()
         # TODO define a magic exit for thread that calls OSExitThread and use it here
-        context = CPUContext.for_new_thread(func, user_data, 0)
+        context = CPUContext.for_new_thread(func, user_data if user_data is not None else 0, 0)
         self._uc.mem_write(context_offset, context.to_bytes())
 
         # Allocate the thread descriptor on target heap.
@@ -381,13 +387,42 @@ class Scheduler:
         desc = ThreadDescriptor(
             thread_func_ptr=func,
             stack=stack_top,
-            sp=stack_bottom,
+            sp=context_offset,
         )
         desc.set_slot(slot)
         self._uc.mem_write(thr_ptr, desc.to_bytes())
 
+        return thr_ptr
+
     def read_thread_descriptor(self, addr: int) -> ThreadDescriptor:
         return ThreadDescriptor.from_bytes(self._uc.mem_read(addr, ThreadDescriptor.sizeof()))
+
+    def get_slot(self, slot: int) -> Optional[int]:
+        """
+        Directly get the pointer saved in a slot. In most cases this is not needed.
+        :param slot: Slot number.
+        :return: The , or None if the slot is not set.
+        """
+        return self._slots[slot]
+
+    def set_slot(self, slot: int, thr: Optional[int]) -> None:
+        """
+        Directly set a slot. In most cases this is not needed.
+
+        Unlike register(), this will not synchronize the slot number saved on teh descriptor nor changing the mask.
+        :param slot: Slot number.
+        :param thr: Guest pointer to a thread descriptor.
+        """
+        self._slots[slot] = thr
+
+    def read_thread_descriptor_by_slot(self, slot: int) -> Optional[ThreadDescriptor]:
+        """
+        Return parsed descriptor in a slot.
+        :param slot: Slot number.
+        :return: Parsed descriptor, or None if the slot is not set.
+        """
+        thr = self._slots[slot]
+        return self.read_thread_descriptor(thr) if thr is not None else None
 
     def register(self, thr: int, unmask: bool = True):
         """

@@ -7,6 +7,9 @@ from unicorn import (
     Uc,
     UC_ARCH_ARM,
     UC_MODE_ARM,
+    UC_PROT_NONE,
+    UC_PROT_READ,
+    UC_PROT_WRITE,
     UC_MEM_READ,
     UC_MEM_WRITE,
 )
@@ -31,7 +34,7 @@ from unicorn.arm_const import (
     UC_ARM_REG_PC,
 )
 
-from pymutekiu.hle.threading import ThreadDescriptor, CPUContext, MaskTable
+from pymutekiu.hle.threading import ThreadDescriptor, CPUContext, MaskTable, Scheduler
 
 
 class ThreadDescriptorTest(unittest.TestCase):
@@ -79,6 +82,9 @@ class ThreadDescriptorTest(unittest.TestCase):
 
 
 class CPUContextTest(unittest.TestCase):
+    """
+    CPUContext
+    """
     _TEST: dict[str, int] = {
         'cpsr': 0x13,
         'r0': 0x0,
@@ -162,6 +168,9 @@ class CPUContextTest(unittest.TestCase):
 
 
 class MaskTableTest(unittest.TestCase):
+    """
+    MaskTable
+    """
     def setUp(self):
         self._masks = MaskTable()
 
@@ -199,3 +208,61 @@ class MaskTableTest(unittest.TestCase):
         Should return 0 when all values are masked.
         """
         self.assertEqual(self._masks.first_unmasked(), 0)
+
+
+class SchedulerTestWithoutMock(unittest.TestCase):
+    """
+    Scheduler - Without any active mock objects.
+    """
+    def test_find_empty_normal_slot(self):
+        """
+        Should return 8 when the slots are empty.
+        """
+        sched = Scheduler(mock.MagicMock(), mock.MagicMock())
+        self.assertEqual(sched.find_empty_normal_slot(), 8)
+
+
+class SchedulerTestWithMock(unittest.TestCase):
+    """
+    Scheduler - With partially mocked Unicorn.
+    """
+    def setUp(self):
+        self._uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
+        self._uc.ctl_set_cpu_model(UC_CPU_ARM_926)
+
+        # Stub some functions
+        self._uc.emu_start = mock.MagicMock()
+        self._uc.emu_stop = mock.MagicMock()
+        self._mock_states = mock.MagicMock()
+        self._mock_states.heap = mock.MagicMock()
+        self._mock_states.heap.malloc = mock.MagicMock()
+        self._mock_states.heap.malloc.return_value = 0x10000000
+        self._uc.mem_map(0x10000000, 4096)
+
+    def test_new_thread(self):
+        expected_stack_bottom = 0xff000000
+        expected_stack_top = expected_stack_bottom - 0x8000
+        expected_stack_guard_top = expected_stack_top - 4096
+
+        sched = Scheduler(self._uc, self._mock_states)
+        thr = sched.new_thread(0xcafe0000)
+        # Thread should be allocated on the allocated memory address.
+        self.assertEqual(thr, 0x10000000)
+
+        desc = ThreadDescriptor.from_bytes(self._uc.mem_read(thr, ThreadDescriptor.sizeof()))
+
+        # Check thread descriptor values.
+        self.assertEqual(desc.sp, expected_stack_bottom - CPUContext.sizeof())
+        self.assertEqual(desc.thread_func_ptr, 0xcafe0000)
+        self.assertEqual(desc.stack, expected_stack_top)
+
+        # Check memory map (double inclusive)
+        mem_map = tuple(self._uc.mem_regions())
+        self.assertIn(
+            (expected_stack_top, expected_stack_bottom - 1, UC_PROT_READ | UC_PROT_WRITE), mem_map,
+            'Stack not allocated.',
+        )
+        self.assertIn(
+            (expected_stack_guard_top, expected_stack_top - 1, UC_PROT_NONE), mem_map,
+            'Stack guard page not allocated.',
+        )

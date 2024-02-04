@@ -103,6 +103,8 @@ class ErrnoCauseKernel(enum.IntEnum):
     FS_READ_ONLY_FILE = 0x0158
     # Path too long.
     FS_PATH_TOO_LONG = 0x0162
+    # Internal error. (?)
+    FS_INTERNAL = auto()
     # Too many files in this directory (alternative).
     FS_DIR_FULL_ALT1 = 0x0165
     # Too many files in this directory (alternative).
@@ -210,7 +212,7 @@ STRERROR_KERNEL: dict[ErrnoCauseKernel, str] = {
 STRERROR_EXEC: dict[ErrnoCauseExec, str] = {
     ErrnoCauseExec.EXEC_UNSUPPORTED: 'Unsupported executable format.',
     ErrnoCauseExec.EXEC_INVALID: 'Invalid executable file.',
-    ErrnoCauseExec.EXEC_OPEN_FAILED: 'Failed to open executable.',
+    ErrnoCauseExec.EXEC_OPEN_FAILED: 'Failed to open executable file.',
     ErrnoCauseExec.EXEC_LOADER_FAILURE: 'An error occurred when loading the executable.',
     ErrnoCauseExec.EXEC_MALLOC_FAILED: 'Loader failed to allocate memory.',
     ErrnoCauseExec.EXEC_DECOMPRESSION_FAILED: 'Executable decompression failed.',
@@ -232,6 +234,9 @@ def guest_os_strerror(errno: int) -> str:
 
 
 class GuestOSError(RuntimeError):
+    """
+    Besta RTOS errno in exception form.
+    """
     def __init__(self, namespace: ErrnoNamespace, cause: ErrnoCause):
         self.namespace = namespace
         self.cause = cause
