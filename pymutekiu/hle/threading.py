@@ -341,6 +341,22 @@ class Scheduler:
         self._yield_reason = None
         self._yield_request_num = None
 
+    @property
+    def current_slot(self) -> Optional[int]:
+        """
+        The slot number of the current active thread.
+        :return: The slot number of the current active thread, or None if the scheduler hasn't got a thread to execute.
+        """
+        return self._current_slot
+
+    @property
+    def current_thread(self) -> Optional[int]:
+        """
+        The guest pointer of current active thread.
+        :return: The guest pointer of current active thread, or None if the scheduler hasn't got a thread to execute.
+        """
+        return self._slots[self._current_slot] if self._current_slot is not None else None
+
     def find_empty_normal_slot(self) -> int:
         """
         Finds the next empty normal slot.
@@ -411,16 +427,26 @@ class Scheduler:
         return thr_ptr
 
     def read_thread_descriptor(self, addr: int) -> ThreadDescriptor:
+        """
+        Convenient method to read a thread descriptor.
+        :param addr: Guest pointer to the thread descriptor.
+        :return: The parsed thread descriptor.
+        """
         return ThreadDescriptor.from_bytes(self._uc.mem_read(addr, ThreadDescriptor.sizeof()))
 
     def write_thread_descriptor(self, addr: int, desc: ThreadDescriptor) -> None:
+        """
+        Convenient method to write to a thread descriptor.
+        :param addr: Guest pointer to the thread descriptor.
+        :param desc: The descriptor object.
+        """
         self._uc.mem_write(addr, desc.to_bytes())
 
     def get_slot(self, slot: int) -> Optional[int]:
         """
         Directly get the pointer saved in a slot. In most cases this is not needed.
         :param slot: Slot number.
-        :return: The , or None if the slot is not set.
+        :return: Guest pointer to the thread descriptor, or None if the slot is not set.
         """
         return self._slots[slot]
 
@@ -469,8 +495,10 @@ class Scheduler:
         Set errno on current thread.
         :param errno: Error code.
         """
-        desc = self.read_thread_descriptor(self._slots[self._current_slot])
+        thr = self._slots[self._current_slot]
+        desc = self.read_thread_descriptor(thr)
         desc.kerrno = errno
+        self.write_thread_descriptor(thr, desc)
 
     def get_errno(self) -> int:
         """
@@ -538,6 +566,7 @@ class Scheduler:
         if self._current_slot is not None:
             self.save_context()
         self.load_context(slot)
+        self._current_slot = slot
 
         return True
 

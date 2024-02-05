@@ -266,3 +266,21 @@ class SchedulerTestWithMock(unittest.TestCase):
             (expected_stack_guard_top, expected_stack_top - 1, UC_PROT_NONE), mem_map,
             'Stack guard page not allocated.',
         )
+
+    def test_switch_init(self):
+        """
+        Should switch to the initial thread.
+        """
+        sched = Scheduler(self._uc, self._mock_states)
+        thr = sched.new_thread(0xcafe0000)
+        sched.register(thr, True)
+        self.assertTrue(sched.switch())
+        self.assertEqual(sched.current_thread, thr)
+
+    def test_get_set_errno(self):
+        sched = Scheduler(self._uc, self._mock_states)
+        thr = sched.new_thread(0xcafe0000)
+        sched.register(thr, True)
+        sched.switch()
+        sched.set_errno(0x11223344)
+        self.assertEqual(sched.get_errno(), 0x11223344)
