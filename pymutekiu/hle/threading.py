@@ -495,7 +495,7 @@ class Scheduler:
         Set errno on current thread.
         :param errno: Error code.
         """
-        thr = self._slots[self._current_slot]
+        thr = self.current_thread
         desc = self.read_thread_descriptor(thr)
         desc.kerrno = errno
         self.write_thread_descriptor(thr, desc)
@@ -505,7 +505,7 @@ class Scheduler:
         Get errno from current thread.
         :return: Error code
         """
-        desc = self.read_thread_descriptor(self._slots[self._current_slot])
+        desc = self.read_thread_descriptor(self.current_thread)
         return desc.kerrno
 
     def save_context(self, slot: Optional[int] = None) -> None:
@@ -513,11 +513,10 @@ class Scheduler:
         Switch out from a thread by saving current context to it.
         :param slot: Force the slot number. Uses the current running slot when left unset.
         """
-        if slot is None:
-            slot = self._slots[self._current_slot]
+        thr = self.current_thread if slot is None else self._slots[slot]
 
         # Read the current thread descriptor
-        desc_from = self.read_thread_descriptor(slot)
+        desc_from = self.read_thread_descriptor(thr)
 
         # Save the context to the stack
         ctx = CPUContext.from_emulator_context(self._uc)
@@ -526,7 +525,7 @@ class Scheduler:
         desc_from.sp = sp
 
         # Commit the descriptor change
-        self.write_thread_descriptor(slot, desc_from)
+        self.write_thread_descriptor(thr, desc_from)
 
     def load_context(self, slot: int) -> None:
         """
@@ -566,7 +565,6 @@ class Scheduler:
         if self._current_slot is not None:
             self.save_context()
         self.load_context(slot)
-        self._current_slot = slot
 
         return True
 
@@ -609,10 +607,10 @@ class Scheduler:
 
         # Mask the current thread and update the sleep counter
         self._masks.mask(self._current_slot)
-        desc = self.read_thread_descriptor(self._slots[self._current_slot])
+        desc = self.read_thread_descriptor(self.current_thread)
         desc.wait_reason |= ThreadWaitReason.SLEEP
         desc.sleep_counter = jiffies
-        self.write_thread_descriptor(self._slots[self._current_slot], desc)
+        self.write_thread_descriptor(self.current_thread, desc)
 
         # Signal the scheduler to start a new scheduler tick.
         # Actual rescheduling will happen on the next scheduler tick since we process syscalls after the yield and
