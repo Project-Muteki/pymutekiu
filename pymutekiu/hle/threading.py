@@ -317,6 +317,8 @@ class Scheduler:
     _current_slot: Optional[int]
     _slots: list[Optional[int]]
     _masks: MaskTable
+    _desc_head: Optional[int]
+    _desc_tail: Optional[int]
     _yield_reason: Optional[YieldReason]
     _yield_request_num: Optional[int]
 
@@ -332,6 +334,9 @@ class Scheduler:
         self._current_slot = None
         self._slots = [None] * self.THREAD_TABLE_SIZE
         self._masks = MaskTable()
+
+        self._desc_head = None
+        self._desc_tail = None
 
         self._yield_reason = None
         self._yield_request_num = None
@@ -390,6 +395,17 @@ class Scheduler:
             sp=context_offset,
         )
         desc.set_slot(slot)
+
+        # Update the linked list
+        if self._desc_tail is not None:
+            desc_prev = self.read_thread_descriptor(self._desc_tail)
+            desc_prev.next = thr_ptr
+            desc.prev = self._desc_tail
+            self.write_thread_descriptor(self._desc_tail, desc_prev)
+        if self._desc_head is None:
+            self._desc_head = thr_ptr
+        self._desc_tail = thr_ptr
+
         self.write_thread_descriptor(thr_ptr, desc)
 
         return thr_ptr
