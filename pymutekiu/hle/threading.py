@@ -284,16 +284,25 @@ class MaskTable:
 
 
 class YieldReason(enum.Enum):
+    """
+    Reason of thread yield.
+    """
     TIMEOUT = enum.auto()
+    "Scheduler timeout. A reschedule will happen automatically."
     REQUEST_SYSCALL = enum.auto()
+    "Syscall request. The handler will then decide whether to continue execution or to reschedule."
     REQUEST_HLE_FUNC = enum.auto()
+    "HLE function call. The handler will then decide whether to continue execution or to reschedule."
 
 
 class Scheduler:
     """
-    The thread scheduler and handler class.
+    The thread scheduler and guest event handler class. It's responsible for scheduling threads on each scheduler tick
+    and catching syscall/HLE function call requests from the emulator.
 
-    This behaves very similarly to uC/OS-II scheduler since Besta RTOS uses a modified uC/OS-II kernel.
+    At high level the scheduling part of this class behaves very similarly to the uC/OS-II scheduler since the Besta
+    RTOS kernel is basically a modified uC/OS-II kernel with some differences in availability of synchronization
+    primitives, ABI and API signatures.
     """
     JIFFY_TARGET_US = 1000
 
@@ -376,6 +385,14 @@ class Scheduler:
                    user_data: Optional[int] = None,
                    stack_size: int = 0x8000,
                    slot: Optional[int] = None) -> int:
+        """
+        Create a new thread descriptor on the guest heap.
+        :param func: Thread entrypoint function.
+        :param user_data: User data passed to the thread entrypoint, or NULL if unset.
+        :param stack_size: Stack size in bytes. Must be page-aligned.
+        :param slot: Specify an unused slot number. The next available slot will be selected if this is unset.
+        :return:
+        """
         # TODO more robust error handling (i.e. free already allocated resources before raising exceptions)
         if stack_size % 4096 != 0:
             _logger.warning('Stack size is not a multiple of minimum page size.')
@@ -444,7 +461,7 @@ class Scheduler:
 
     def get_slot(self, slot: int) -> Optional[int]:
         """
-        Directly get the pointer saved in a slot. In most cases this is not needed.
+        Directly get the pointer saved in a slot. This is mostly for debugging and in most cases it's not needed.
         :param slot: Slot number.
         :return: Guest pointer to the thread descriptor, or None if the slot is not set.
         """
@@ -452,9 +469,9 @@ class Scheduler:
 
     def set_slot(self, slot: int, thr: Optional[int]) -> None:
         """
-        Directly set a slot. In most cases this is not needed.
+        Directly set a slot. This is mostly for debugging and in most cases it's not needed.
 
-        Unlike register(), this will not synchronize the slot number saved on teh descriptor nor changing the mask.
+        Unlike register(), this will not synchronize the slot number saved on the descriptor nor change the mask.
         :param slot: Slot number.
         :param thr: Guest pointer to a thread descriptor.
         """
