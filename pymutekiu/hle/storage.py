@@ -1,10 +1,12 @@
-from typing import TYPE_CHECKING, Protocol, Optional
+from typing import TYPE_CHECKING, Protocol, Optional, AnyStr, IO
+from fs.errors import FSError, ResourceNotFound
 
 import fs
 import logging
 import string
 import pathlib
 import itertools
+import re
 import ntpath
 
 from .errno import GuestOSError, ErrnoCauseKernel, ErrnoNamespace
@@ -18,6 +20,9 @@ _logger = logging.getLogger('loader')
 
 
 _WINEHASH_B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ012345'
+
+_SFN_INVALID_CHARS = re.escape(r'\x00*?<>|"+=,;[]~.')
+_SFN_INVALID_CHARS_M = re.compile(f"[{_SFN_INVALID_CHARS}|[\u007f-\U0010ffff]")
 
 
 def _winehash(str_: str, seed: int = 0xbeef) -> str:
@@ -34,6 +39,11 @@ def _winehash(str_: str, seed: int = 0xbeef) -> str:
     h = ((h << 3) ^ (h >> 5) ^ (bytes_[-2] | (bytes_[-1] << 8))) & 0xffff
     return f'{_WINEHASH_B32[(h >> 10) & 0x1f]}{_WINEHASH_B32[(h >> 5) & 0x1f]}{_WINEHASH_B32[h & 0x1f]}'
 
+
+def _strip_drive_from_abs_path(path: pathlib.PureWindowsPath) -> pathlib.PureWindowsPath:
+    if path.drive == '':
+        return path
+    return pathlib.PureWindowsPath('\\', path.relative_to(path.anchor))
 
 class BlockDeviceIO(Protocol):
     """
@@ -104,24 +114,85 @@ class VFS:
         self._cwd_fs = {}
         self._current_drive = 'C'
 
-    def mount_drive(self, letter: str, fs_path: str) -> None:
+    def get_underlying_fs(self, letter: str) -> 'FS':
+        return self._drives[letter]
+
+    def mount_drive(self, letter: str | pathlib.PureWindowsPath, fs_path: str) -> None:
         assert letter not in self._drives, f'Drive letter {repr(letter)} already in use.'
         self._drives[letter] = fs.open_fs(fs_path)
         self._cwd[letter] = pathlib.PureWindowsPath('\\')
+        self._cwd_fs[letter] = self._drives[letter].opendir('/')
 
     def unmount_drive(self, letter: str) -> None:
         assert letter in self._drives, f'Drive {repr(letter)} not mounted.'
         self._drives[letter].close()
         del self._drives[letter]
         del self._cwd[letter]
+        del self._cwd_fs[letter]
 
-    def getcwd(self, sfn: bool = False):
+    def _expand_sfn(self, path: pathlib.PureWindowsPath) -> pathlib.PureWindowsPath:
+        # TODO
+        return path
+
+    @staticmethod
+    def _shrink_lfn(path: pathlib.PureWindowsPath) -> pathlib.PureWindowsPath:
+        if path.is_absolute():
+            path_driveless = path.relative_to(path.anchor)
+        else:
+            path_driveless = path
+        new_parts: list[str] = []
+        for part_str in path_driveless.parts:
+            part = pathlib.PureWindowsPath(part_str)
+            stem_no_invalid = _SFN_INVALID_CHARS_M.sub('_', part.stem.replace(' ', ''))
+            suffix_no_invalid = _SFN_INVALID_CHARS_M.sub('_', part.suffix.replace(' ', '_'))
+            if part_str[-1] != '.' and \
+                    stem_no_invalid == part.stem and suffix_no_invalid == part.suffix and \
+                    len(stem_no_invalid) <= 8 and len(suffix_no_invalid) <= 3:
+                new_stem = stem_no_invalid.upper()
+                new_suffix = suffix_no_invalid.upper()
+            else:
+                new_stem_1 = stem_no_invalid.upper()[:4]
+                new_stem_2 = '~' * (5 - len(new_stem_1))
+                new_stem_3 = _winehash(part_str)
+                new_stem = ''.join((new_stem_1, new_stem_2, new_stem_3))
+                new_suffix = suffix_no_invalid.upper()[:3]
+            new_parts.append(new_stem if new_suffix == '' else '.'.join((new_stem, new_suffix)))
+        return pathlib.PureWindowsPath(path.anchor, *new_parts)
+
+    def getcwd(self, sfn: bool = False) -> pathlib.PureWindowsPath:
+        cwd_nodrive = self._cwd[self._current_drive]
         # TODO handle sfn
-        return f'{self._current_drive}:{str(self._cwd[self._current_drive])}'
+        if sfn:
+            cwd_nodrive = self._shrink_lfn(cwd_nodrive)
+        return pathlib.PureWindowsPath(f'{self._current_drive}:', cwd_nodrive)
 
     # TODO
-    def open(self, path: str, mode: str):
-        ...
+    def open(self, path: str | pathlib.PureWindowsPath, mode: str) -> IO[AnyStr]:
+        path = pathlib.PureWindowsPath(path)
+        if path.is_absolute():
+            drive = path.drive
+            if drive == '':
+                # Use current drive if drive is not set
+                drive = self._current_drive
+            elif drive[-1] == ':':
+                # Use the specified drive letter if available
+                drive = drive[:-1]
+            else:
+                # TODO handle UNC (do we need to do it here or do we have another layer that handles device IO?)
+                _logger.error('UNC path %s not supported on VFS.', repr(str(path)))
+                raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseKernel.FS_INVALID_FILENAME)
+            parts = _strip_drive_from_abs_path(path)
+        else:
+            drive = self._current_drive
+            parts = path
+        parts = self._expand_sfn(parts)
+        try:
+            return self._cwd_fs[drive].open(parts.as_posix(), mode)
+        except FSError as e:
+            if isinstance(e, ResourceNotFound):
+                raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseKernel.FS_NO_SUCH_ENTRY) from e
+            else:
+                raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseKernel.FS_INTERNAL) from e
 
 
 class BlockDeviceManager:
