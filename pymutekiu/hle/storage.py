@@ -1,3 +1,4 @@
+import functools
 from typing import TYPE_CHECKING, Protocol, Optional, AnyStr, IO
 from fs.errors import FSError, ResourceNotFound
 
@@ -44,6 +45,26 @@ def _strip_drive_from_abs_path(path: pathlib.PureWindowsPath) -> pathlib.PureWin
     if path.drive == '':
         return path
     return pathlib.PureWindowsPath('\\', path.relative_to(path.anchor))
+
+
+@functools.lru_cache(128)
+def _shrink_lfn_part(part_str: str) -> str:
+    part = pathlib.PureWindowsPath(part_str)
+    stem_no_invalid = _SFN_INVALID_CHARS_M.sub('_', part.stem.replace(' ', ''))
+    suffix_no_invalid = _SFN_INVALID_CHARS_M.sub('_', part.suffix[1:].replace(' ', '_'))
+    if part_str[-1] != '.' and \
+            stem_no_invalid == part.stem and suffix_no_invalid == part.suffix[1:] and \
+            len(stem_no_invalid) <= 8 and len(suffix_no_invalid) <= 3:
+        new_stem = stem_no_invalid.upper()
+        new_suffix = suffix_no_invalid.upper()
+    else:
+        new_stem_1 = stem_no_invalid.upper()[:4]
+        new_stem_2 = '~' * (5 - len(new_stem_1))
+        new_stem_3 = _winehash(part_str)
+        new_stem = ''.join((new_stem_1, new_stem_2, new_stem_3))
+        new_suffix = suffix_no_invalid.upper()[:3]
+    return new_stem if new_suffix == '' else '.'.join((new_stem, new_suffix))
+
 
 class BlockDeviceIO(Protocol):
     """
@@ -131,32 +152,50 @@ class VFS:
         del self._cwd_fs[letter]
 
     def _expand_sfn(self, path: pathlib.PureWindowsPath) -> pathlib.PureWindowsPath:
-        # TODO
-        return path
+        if path.anchor != '':
+            path_rel_to_anchor = path.relative_to(path.anchor)
+        else:
+            path_rel_to_anchor = path
 
-    @staticmethod
-    def _shrink_lfn(path: pathlib.PureWindowsPath) -> pathlib.PureWindowsPath:
+        drive = self._current_drive if path.drive == '' else path.drive[:-1]
+
+        path_lfn_parts = []
+        is_terminal = False
+        if drive not in self._cwd_fs:
+            raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseKernel.SYS_STORAGE_DEVICE_NOT_FOUND)
+        search_path = self._cwd_fs[drive]
+        for part in path_rel_to_anchor.parts:
+            if is_terminal:
+                raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseKernel.FS_NO_SUCH_ENTRY)
+            if search_path.exists(part):
+                path_lfn_parts.append(part)
+                continue
+            # Basic sanity check to rule out an LFN mismatch
+            # TODO do more test here
+            if len(part) > 12:
+                raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseKernel.FS_NO_SUCH_ENTRY)
+            found_entry: Optional[str] = None
+            for entry in search_path.listdir('.'):
+                if _shrink_lfn_part(entry) == part:
+                    found_entry = entry
+                    continue
+            if found_entry is None:
+                raise GuestOSError(ErrnoNamespace.KERNEL, ErrnoCauseKernel.FS_NO_SUCH_ENTRY)
+            path_lfn_parts.append(found_entry)
+            if search_path.isdir(found_entry):
+                search_path = search_path.opendir(found_entry)
+            else:
+                is_terminal = True
+        return pathlib.PureWindowsPath(path.anchor, *path_lfn_parts)
+
+    def _shrink_lfn(self, path: pathlib.PureWindowsPath) -> pathlib.PureWindowsPath:
         if path.is_absolute():
             path_driveless = path.relative_to(path.anchor)
         else:
             path_driveless = path
         new_parts: list[str] = []
         for part_str in path_driveless.parts:
-            part = pathlib.PureWindowsPath(part_str)
-            stem_no_invalid = _SFN_INVALID_CHARS_M.sub('_', part.stem.replace(' ', ''))
-            suffix_no_invalid = _SFN_INVALID_CHARS_M.sub('_', part.suffix.replace(' ', '_'))
-            if part_str[-1] != '.' and \
-                    stem_no_invalid == part.stem and suffix_no_invalid == part.suffix and \
-                    len(stem_no_invalid) <= 8 and len(suffix_no_invalid) <= 3:
-                new_stem = stem_no_invalid.upper()
-                new_suffix = suffix_no_invalid.upper()
-            else:
-                new_stem_1 = stem_no_invalid.upper()[:4]
-                new_stem_2 = '~' * (5 - len(new_stem_1))
-                new_stem_3 = _winehash(part_str)
-                new_stem = ''.join((new_stem_1, new_stem_2, new_stem_3))
-                new_suffix = suffix_no_invalid.upper()[:3]
-            new_parts.append(new_stem if new_suffix == '' else '.'.join((new_stem, new_suffix)))
+            new_parts.append(_shrink_lfn_part(part_str))
         return pathlib.PureWindowsPath(path.anchor, *new_parts)
 
     def getcwd(self, sfn: bool = False) -> pathlib.PureWindowsPath:
