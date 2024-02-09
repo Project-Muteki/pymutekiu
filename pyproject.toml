@@ -17,6 +17,7 @@ fs = {git = "https://github.com/Project-Muteki/pyfilesystem2.git"}
 types-pefile = "^2023.2.7.post0"
 setuptools = "^69.0.2"
 ipython = "^8.18.1"
+keystone-engine = "^0.9.2"
 
 [build-system]
 requires = ["poetry-core"]
