@@ -366,6 +366,14 @@ class Scheduler:
         """
         return self._slots[self._current_slot] if self._current_slot is not None else None
 
+    @property
+    def yield_reason(self):
+        return self._yield_reason
+
+    @property
+    def yield_request_num(self):
+        return self._yield_request_num
+
     def find_empty_normal_slot(self) -> int:
         """
         Finds the next empty normal slot.

@@ -34,7 +34,7 @@ from unicorn.arm_const import (
     UC_ARM_REG_PC,
 )
 
-from pymutekiu.hle.threading import ThreadDescriptor, CPUContext, MaskTable, Scheduler
+from pymutekiu.hle.threading import ThreadDescriptor, CPUContext, MaskTable, Scheduler, YieldReason
 
 
 class ThreadDescriptorTest(unittest.TestCase):
@@ -231,12 +231,17 @@ class SchedulerTestWithMock(unittest.TestCase):
         self._uc.ctl_set_cpu_model(UC_CPU_ARM_926)
 
         # Stub some functions
+        # Unicorn
         self._uc.emu_start = mock.MagicMock()
         self._uc.emu_stop = mock.MagicMock()
+
+        # OSStates
         self._mock_states = mock.MagicMock()
         self._mock_states.heap = mock.MagicMock()
         self._mock_states.heap.malloc = mock.MagicMock()
         self._mock_states.heap.malloc.return_value = 0x10000000
+
+        # Fake heap alloc
         self._uc.mem_map(0x10000000, 4096)
 
     def test_new_thread(self):
@@ -284,3 +289,42 @@ class SchedulerTestWithMock(unittest.TestCase):
         sched.switch()
         sched.set_errno(0x11223344)
         self.assertEqual(sched.get_errno(), 0x11223344)
+
+    def test_yield_from_svc(self):
+        sched = Scheduler(self._uc, self._mock_states)
+
+        # Values
+        sp = 0x20000000 + 4096
+        sp_before_syscall = sp - 8
+        lr = 0x10000000
+        r0 = 0x12345678
+        r1 = 0xdeadbeef
+        r2 = 0xdeaddead
+        r3 = 0xbeefbeef
+
+        # Setup extra states
+        self._uc.mem_map(0x20000000, 4096)
+        self._uc.mem_write(sp_before_syscall, lr.to_bytes(4, 'little'))
+        self._uc.mem_write(sp_before_syscall + 4, r0.to_bytes(4, 'little'))
+        self._uc.reg_write(UC_ARM_REG_R0, 0x0)
+        self._uc.reg_write(UC_ARM_REG_R1, r1)
+        self._uc.reg_write(UC_ARM_REG_R2, r2)
+        self._uc.reg_write(UC_ARM_REG_R3, r3)
+        self._uc.reg_write(UC_ARM_REG_LR, 0x0)
+        self._uc.reg_write(UC_ARM_REG_SP, sp_before_syscall)
+
+        # Set SVC instruction for use by the handler
+        self._uc.reg_write(UC_ARM_REG_PC, 0x10000004)
+        self._uc.mem_write(0x10000000, bytes.fromhex('000001ef'))  # svc 0x10000
+
+        sched.yield_from_svc()
+
+        cast(mock.MagicMock, self._uc.emu_stop).assert_called_once()
+        self.assertEqual(self._uc.reg_read(UC_ARM_REG_R0), r0, 'r0 not properly restored.')
+        self.assertEqual(self._uc.reg_read(UC_ARM_REG_R1), r1, 'r1 clobbered.')
+        self.assertEqual(self._uc.reg_read(UC_ARM_REG_R2), r2, 'r2 clobbered.')
+        self.assertEqual(self._uc.reg_read(UC_ARM_REG_R3), r3, 'r3 clobbered.')
+        self.assertEqual(self._uc.reg_read(UC_ARM_REG_LR), lr, 'lr not properly restored.')
+        self.assertEqual(self._uc.reg_read(UC_ARM_REG_SP), sp, 'unexpected sp value.')
+        self.assertEqual(sched.yield_reason, YieldReason.REQUEST_SYSCALL, 'Wrong yield reason.')
+        self.assertEqual(sched.yield_request_num, 0x10000, 'Wrong request number.')

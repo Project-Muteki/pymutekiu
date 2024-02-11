@@ -70,6 +70,7 @@ class Experiments(unittest.TestCase):
         self._uc.mem_write(code_page + 0x14, guard_page.to_bytes(4, 'little'))
         old_cpsr = self._uc.reg_read(UC_ARM_REG_CPSR)
 
+        # Trying to do the thing listed under https://github.com/unicorn-engine/unicorn/issues/1137 but failing.
         # Apparently it does raise an exception when on_fetch_prot returns False. Ignore that specific exception.
         with self.assertRaises(UcError) as cm:
             self._uc.emu_start(code_page, 0)
