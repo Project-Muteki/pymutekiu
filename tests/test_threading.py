@@ -34,7 +34,7 @@ from unicorn.arm_const import (
     UC_ARM_REG_PC,
 )
 
-from pymutekiu.hle.threading import ThreadDescriptor, CPUContext, MaskTable, Scheduler, YieldReason
+from pymutekiu.hle.threading import ThreadDescriptor, CPUContext, MaskTable, Scheduler, YieldReason, ThreadWaitReason
 
 
 class ThreadDescriptorTest(unittest.TestCase):
@@ -328,3 +328,18 @@ class SchedulerTestWithMock(unittest.TestCase):
         self.assertEqual(self._uc.reg_read(UC_ARM_REG_SP), sp, 'unexpected sp value.')
         self.assertEqual(sched.yield_reason, YieldReason.REQUEST_SYSCALL, 'Wrong yield reason.')
         self.assertEqual(sched.yield_request_num, 0x10000, 'Wrong request number.')
+
+    def test_request_sleep_from_syscall(self):
+        sched = Scheduler(self._uc, self._mock_states)
+        sched.signal_reschedule = mock.MagicMock()
+
+        # Create the current thread
+        thr = sched.new_thread(0xcafe0000)
+        sched.register(thr)
+        sched.switch()
+
+        sched.request_sleep_from_syscall(100)
+        desc = sched.read_thread_descriptor(thr)
+        self.assertEqual(desc.wait_reason, ThreadWaitReason.SLEEP, 'Wrong wait reason.')
+        self.assertEqual(desc.sleep_counter, 100, 'Unexpected sleep counter value.')
+        cast(mock.MagicMock, sched.signal_reschedule).assert_called_once()

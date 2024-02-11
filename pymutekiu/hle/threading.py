@@ -224,7 +224,7 @@ class MaskTable:
 
     def unmask(self, slot_or_x: int, y: Optional[int] = None) -> tuple[int, int]:
         """
-        Unmask a specific slot (clear the bit) in the table.
+        Unmask a specific slot (set the bit) in the table.
         :param slot_or_x: Slot number or the x (LSB) part of the slot number.
         :param y: Either None, or the y (MSB) part of the slot number.
         :return: The slot's (x, y) value as a tuple.
@@ -242,7 +242,7 @@ class MaskTable:
 
     def mask(self, slot_or_x: int, y: Optional[int] = None) -> tuple[int, int]:
         """
-        Mask a specific slot (set the bit) in the table.
+        Mask a specific slot (clear the bit) in the table.
         :param slot_or_x: Slot number or the x (LSB) part of the slot number.
         :param y: Either None, or the y (MSB) part of the slot number.
         :return: The slot's (x, y) value as a tuple.
@@ -275,7 +275,7 @@ class MaskTable:
 
     def first_unmasked(self) -> int:
         """
-        Query and return the first unmasked slot (offset of the first cleared bit).
+        Query and return the first unmasked slot (offset of the first set bit).
         :return: First unmasked slot.
         """
         first_y = self._first_unmasked_table[self._y]
