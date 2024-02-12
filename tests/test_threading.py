@@ -205,9 +205,9 @@ class MaskTableTest(unittest.TestCase):
 
     def test_all_masked(self):
         """
-        Should return 0 when all values are masked.
+        Should return None when all values are masked.
         """
-        self.assertEqual(self._masks.first_unmasked(), 0)
+        self.assertIsNone(self._masks.first_unmasked())
 
 
 class SchedulerTestWithoutMock(unittest.TestCase):
@@ -224,7 +224,7 @@ class SchedulerTestWithoutMock(unittest.TestCase):
 
 class SchedulerTestWithMock(unittest.TestCase):
     """
-    Scheduler - With partially mocked Unicorn.
+    Scheduler - With partially mocked Unicorn and mocked heap.
     """
     def setUp(self):
         self._uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
@@ -240,6 +240,7 @@ class SchedulerTestWithMock(unittest.TestCase):
         self._mock_states.heap = mock.MagicMock()
         self._mock_states.heap.malloc = mock.MagicMock()
         self._mock_states.heap.malloc.return_value = 0x10000000
+        self._mock_states.heap.free = mock.MagicMock()
 
         # Fake heap alloc
         self._uc.mem_map(0x10000000, 4096)
@@ -263,6 +264,7 @@ class SchedulerTestWithMock(unittest.TestCase):
 
         # Check memory map (double inclusive)
         mem_map = tuple(self._uc.mem_regions())
+        self.assertEqual(len(mem_map), 3, 'Unexpected # of memory maps.')
         self.assertIn(
             (expected_stack_top, expected_stack_bottom - 1, UC_PROT_READ | UC_PROT_WRITE), mem_map,
             'Stack not allocated.',
@@ -272,21 +274,43 @@ class SchedulerTestWithMock(unittest.TestCase):
             'Stack guard page not allocated.',
         )
 
+    def test_delete_thread(self):
+        """
+        Should delete a previously allocated thread.
+        """
+        expected_stack_bottom = 0xff000000
+        expected_stack_top = expected_stack_bottom - 0x8000
+        expected_stack_guard_top = expected_stack_top - 4096
+
+        sched = Scheduler(self._uc, self._mock_states)
+        thr = sched.new_thread(0xcafe0000)
+        sched.delete_thread(thr)
+
+        cast(mock.MagicMock, self._mock_states.heap.free).assert_called_once_with(0x10000000)
+
+        # Check memory map (double inclusive)
+        mem_map = tuple(self._uc.mem_regions())
+        self.assertEqual(len(mem_map), 1, 'Unexpected # of memory maps.')
+        self.assertNotIn(
+            (expected_stack_top, expected_stack_bottom - 1, UC_PROT_READ | UC_PROT_WRITE), mem_map,
+            'Stack not deallocated.',
+        )
+        self.assertNotIn(
+            (expected_stack_guard_top, expected_stack_top - 1, UC_PROT_NONE), mem_map,
+            'Stack guard page not deallocated.',
+        )
+
     def test_switch_init(self):
         """
         Should switch to the initial thread.
         """
         sched = Scheduler(self._uc, self._mock_states)
         thr = sched.new_thread(0xcafe0000)
-        sched.register(thr, True)
-        self.assertTrue(sched.switch())
         self.assertEqual(sched.current_thread, thr)
 
     def test_get_set_errno(self):
         sched = Scheduler(self._uc, self._mock_states)
         thr = sched.new_thread(0xcafe0000)
-        sched.register(thr, True)
-        sched.switch()
         sched.set_errno(0x11223344)
         self.assertEqual(sched.get_errno(), 0x11223344)
 
@@ -331,15 +355,14 @@ class SchedulerTestWithMock(unittest.TestCase):
 
     def test_request_sleep_from_syscall(self):
         sched = Scheduler(self._uc, self._mock_states)
-        sched.signal_reschedule = mock.MagicMock()
 
         # Create the current thread
         thr = sched.new_thread(0xcafe0000)
-        sched.register(thr)
-        sched.switch()
 
         sched.request_sleep_from_syscall(100)
         desc = sched.read_thread_descriptor(thr)
         self.assertEqual(desc.wait_reason, ThreadWaitReason.SLEEP, 'Wrong wait reason.')
         self.assertEqual(desc.sleep_counter, 100, 'Unexpected sleep counter value.')
-        cast(mock.MagicMock, sched.signal_reschedule).assert_called_once()
+
+
+# TODO Scheduler - With partially mocked Unicorn and real heap.

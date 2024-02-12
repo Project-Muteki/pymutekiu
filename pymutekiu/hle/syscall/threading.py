@@ -6,8 +6,7 @@ class Threading(SyscallModule):
     @syscalldef(0x10000, 'pointer', ['pointer', 'pointer', 'uint32', 'bool'])
     def OSCreateThread(self, func: int, user_data: int, stack_size: int, defer_start: bool) -> int:
         try:
-            thr = self._states.sched.new_thread(func, user_data, stack_size)
-            self._states.sched.register(thr, unmask=not defer_start)
+            thr = self._states.sched.new_thread(func, user_data, stack_size, defer_start)
         except GuestOSError as err:
             self._states.sched.set_errno(err.errno)
             return 0

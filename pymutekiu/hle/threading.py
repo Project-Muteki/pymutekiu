@@ -273,11 +273,14 @@ class MaskTable:
             x = slot_or_x
         return bool((self._x[y] >> x) & 1)
 
-    def first_unmasked(self) -> int:
+    def first_unmasked(self) -> Optional[int]:
         """
         Query and return the first unmasked slot (offset of the first set bit).
-        :return: First unmasked slot.
+        :return: First unmasked slot, or None if everything is masked.
         """
+        if self._y == 0:
+            return None
+
         first_y = self._first_unmasked_table[self._y]
         first_x = self._first_unmasked_table[self._x[first_y]]
         return (first_y << self._xshift) | first_x
@@ -321,8 +324,9 @@ class Scheduler:
     _uc: Uc
     _states: 'OSStates'
     _stack_page_allocator: utils.MemPageTracker
+    _stack_page_map: dict[int, int]
     _sched_tick_starts_at: int
-    _reschedule: bool
+    _sched_tick_fired: bool
     _current_slot: Optional[int]
     _slots: list[Optional[int]]
     _masks: MaskTable
@@ -336,9 +340,10 @@ class Scheduler:
         self._states = states
 
         self._stack_page_allocator = utils.MemPageTracker(self.STACK_LIMIT)
+        self._stack_page_map = {}
 
         self._sched_tick_starts_at = 0
-        self._reschedule = True
+        self._sched_tick_fired = True
 
         self._current_slot = None
         self._slots = [None] * self.THREAD_TABLE_SIZE
@@ -392,12 +397,14 @@ class Scheduler:
                    func: int,
                    user_data: Optional[int] = None,
                    stack_size: int = 0x8000,
+                   defer_start: bool = False,
                    slot: Optional[int] = None) -> int:
         """
-        Create a new thread descriptor on the guest heap.
+        Create a new guest thread.
         :param func: Thread entrypoint function.
         :param user_data: User data passed to the thread entrypoint, or NULL if unset.
         :param stack_size: Stack size in bytes. Must be page-aligned.
+        :param defer_start: Set to True to not start the thread immediately.
         :param slot: Specify an unused slot number. The next available slot will be selected if this is unset.
         :return:
         """
@@ -416,6 +423,7 @@ class Scheduler:
         stack_bottom = self.STACK_BASE - page_offset
         stack_top = stack_bottom - stack_size
         stack_guard_top = stack_top - self.STACK_GUARD_SIZE
+        self._stack_page_map[stack_top] = page_offset
         _logger.debug('Mapping stack memory pages @ %#010x, size %#x', stack_top, stack_size)
         self._uc.mem_map(stack_top, stack_size, UC_PROT_READ | UC_PROT_WRITE)
         _logger.debug('Mapping stack guard pages @ %#010x, size %#x', stack_guard_top, self.STACK_GUARD_SIZE)
@@ -449,7 +457,44 @@ class Scheduler:
 
         self.write_thread_descriptor(thr_ptr, desc)
 
+        self._register_no_check(slot, thr_ptr, not defer_start)
+        if not defer_start:
+            self.switch()
+
         return thr_ptr
+
+    def delete_thread(self, addr: int) -> None:
+        """
+        Stop and delete a guest thread by its descriptor.
+        :param addr: Guest pointer to the thread descriptor.
+        """
+        desc = self.read_thread_descriptor(addr)
+
+        # Splice the linked list
+        if desc.prev != 0:
+            desc_prev = self.read_thread_descriptor(desc.prev)
+            desc_prev.next = desc.next
+            self.write_thread_descriptor(desc.prev, desc_prev)
+        if desc.next != 0:
+            desc_next = self.read_thread_descriptor(desc.next)
+            desc_next.prev = desc.prev
+            self.write_thread_descriptor(desc.next, desc_next)
+
+        # Free the stack allocation
+        stack_top = desc.stack
+        page_offset = self._stack_page_map[stack_top]
+        stack_bottom = self.STACK_BASE - page_offset
+        stack_guard_top = stack_top - self.STACK_GUARD_SIZE
+        stack_size = stack_bottom - stack_top
+        self._stack_page_allocator.remove(page_offset)
+        self._uc.mem_unmap(stack_guard_top, self.STACK_GUARD_SIZE)
+        self._uc.mem_unmap(stack_top, stack_size)
+        del self._stack_page_map[stack_top]
+
+        self.unregister(desc.slot)
+
+        # Free the thread itself
+        self._states.heap.free(addr)
 
     def read_thread_descriptor(self, addr: int) -> ThreadDescriptor:
         """
@@ -494,6 +539,11 @@ class Scheduler:
         thr = self._slots[slot]
         return self.read_thread_descriptor(thr) if thr is not None else None
 
+    def _register_no_check(self, slot: int, thr: int, unmask: bool):
+        self._slots[slot] = thr
+        if unmask:
+            self._masks.unmask(slot)
+
     def register(self, thr: int, unmask: bool = True):
         """
         Register a thread with the scheduler and unmask it.
@@ -503,9 +553,7 @@ class Scheduler:
         desc = self.read_thread_descriptor(thr)
         if self._slots[desc.slot] is not None:
             raise RuntimeError('Slot already in use.')
-        self._slots[desc.slot] = thr
-        if unmask:
-            self._masks.unmask(desc.slot)
+        self._register_no_check(desc.slot, thr, unmask)
 
     def unregister(self, slot: int):
         """
@@ -514,6 +562,8 @@ class Scheduler:
         """
         self._masks.mask(slot)
         self._slots[slot] = None
+        if slot == self._current_slot:
+            self.switch()
 
     def set_errno(self, errno: int):
         """
@@ -574,11 +624,18 @@ class Scheduler:
     def switch(self, slot: Optional[int] = None) -> bool:
         """
         Perform a context switch when needed.
-        :param slot: Switch to this context.
+        :param slot: Force switch to this context.
         :return: Whether a context switch was actually performed or not.
         """
         if slot is None:
             slot = self._masks.first_unmasked()
+
+        # If there's no next slot to run, set the current slot to None and report changes accordingly.
+        if slot is None:
+            if self._current_slot is not None:
+                self._current_slot = None
+                return True
+            return False
 
         if self._slots[slot] is None:
             raise ValueError(f'Slot {slot} is empty.')
@@ -586,10 +643,12 @@ class Scheduler:
         # If the current thread is the same as the target, skip.
         if self._current_slot == slot:
             return False
-
+        # Otherwise, if we are switching slots, save the context first if current slot is populated.
         if self._current_slot is not None:
             self.save_context()
+        # Actually switch over.
         self.load_context(slot)
+        self._current_slot = slot
 
         return True
 
@@ -612,23 +671,19 @@ class Scheduler:
         self._yield_request_num = syscall_no
         self._uc.emu_stop()
 
-    def signal_reschedule(self):
-        """
-        Generate a new scheduler tick by resetting the scheduler tick timestamp.
-        """
-        self._sched_tick_starts_at = time.monotonic_ns()
-        self._reschedule = True
-
     def request_sleep_from_syscall(self, jiffies: int):
         """
-        Sets the sleep counter and reset the scheduler tick start timestamp. Returns immediately when requesting 0
-        jiffy.
+        Sets the sleep counter and reschedule. Returns immediately when requesting 0 jiffy.
 
         This method should be called in a syscall handler.
         :param jiffies: Number of jiffies to sleep.
         """
         if jiffies == 0:
             return
+
+        if self._current_slot is None:
+            raise RuntimeError('BUG: Attempt to request sleep when no thread is running. '
+                               'Possible state inconsistency.')
 
         # Mask the current thread and update the sleep counter
         self._masks.mask(self._current_slot)
@@ -637,19 +692,18 @@ class Scheduler:
         desc.sleep_counter = jiffies
         self.write_thread_descriptor(self.current_thread, desc)
 
-        # Signal the scheduler to start a new scheduler tick.
-        # Actual rescheduling will happen on the next scheduler tick since we process syscalls after the yield and
-        # before the next tick.
-        self.signal_reschedule()
+        self.switch()
 
-    def _before_tick(self):
+    def _sched_tick_intr(self):
         """
-        Housekeeping method that runs immediately when Scheduler.tick() was called.
+        Housekeeping routine that only runs when a new scheduler tick is being generated.
+
+        This simulates the code being executed on real Besta RTOS when the ticker interrupt fires.
         """
         # Do nothing when a scheduler tick is not yet expired.
-        if not self._reschedule:
+        if not self._sched_tick_fired:
             return
-        self._reschedule = False
+        self._sched_tick_fired = False
 
         # TODO change this to do a linked list traversal
         for slot, thr in enumerate(self._slots):
@@ -670,28 +724,42 @@ class Scheduler:
             if desc.wait_reason == ThreadWaitReason.NONE:
                 self._masks.unmask(slot)
 
-    def tick(self) -> None:
-        """
-        Attempt to run the scheduler for a single jiffy. May return during an actual scheduler tick i.e. before the
-        jiffy expires.
-
-        This method should be periodically called in the main loop before calling the syscall handler.
-        """
-        # Run housekeeping
-        self._before_tick()
-
         # Perform a context switch if needed.
         self.switch()
+
+    def tick(self) -> None:
+        """
+        Attempt to run the scheduler until a jiffy has passed or a request has been raised from the guest.
+
+        Not to be confused with a scheduler tick i.e. the periodical timer interrupt seen on real devices that fires
+        every jiffy, triggers context switching, thus enables preemptive scheduling. In fact, this method may
+        return during an actual scheduler tick for other reasons, namely syscall and HLE callback requests.
+
+        This method should be periodically called in the main loop **before** the top level syscall/HLE callback
+        handler.
+        """
+        # Run housekeeping
+        self._sched_tick_intr()
+
+        # _current_slot might change during syscall (specifically after unregister() was called) so cache this result
+        # for later.
+        idling = self._current_slot is None
 
         # Determine remaining time
         remaining_time = self.JIFFY_TARGET_US - (time.monotonic_ns() - self._sched_tick_starts_at) // 1000
 
         if remaining_time > 0:
-            # Run emulator for up to the determined time remaining
             self._yield_reason = None
-            self._uc.emu_start(self._uc.reg_read(UC_ARM_REG_PC), 0, timeout=remaining_time)
+            if idling:
+                # No tasks to run. Idling until timeout.
+                time.sleep(remaining_time / 1_000_000)
+            else:
+                # Run emulator for up to the determined time remaining.
+                self._uc.emu_start(self._uc.reg_read(UC_ARM_REG_PC), 0, timeout=remaining_time)
 
-        # Check reason of yield. If it's timeout, update tick start timestamp and run another
-        if remaining_time <= 0 and self._uc.query(UC_QUERY_TIMEOUT) == 1:
+        # Check reason of yield. If it's timeout (idling, syscall taking too long or emulator times out), start a new
+        # scheduler tick
+        if idling or remaining_time <= 0 or self._uc.query(UC_QUERY_TIMEOUT) == 1:
             self._yield_reason = YieldReason.TIMEOUT
-            self.signal_reschedule()
+            self._sched_tick_fired = True
+            self._sched_tick_starts_at = time.monotonic_ns()
