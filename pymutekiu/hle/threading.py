@@ -386,6 +386,7 @@ class Scheduler:
     def find_empty_normal_slot(self) -> int:
         """
         Finds the next empty normal slot.
+
         :return: The next empty normal slot.
         """
         slot_found: Optional[int] = None
@@ -472,6 +473,8 @@ class Scheduler:
         Stop and delete a guest thread by its descriptor.
         :param addr: Guest pointer to the thread descriptor.
         """
+        if addr == 0:
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
         desc = self.read_thread_descriptor(addr)
         desc.validate()
 
@@ -578,6 +581,8 @@ class Scheduler:
         :param thr: Guest pointer to the thread descriptor.
         :param unmask: Also unmask the registered thread and make it executable on next scheduler tick.
         """
+        if thr == 0:
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
         desc = self.read_thread_descriptor(thr)
         desc.validate()
         if self._slots[desc.slot] is not None:
