@@ -35,6 +35,8 @@ from unicorn.arm_const import (
 )
 
 from pymutekiu.hle.threading import ThreadDescriptor, CPUContext, MaskTable, Scheduler, YieldReason, ThreadWaitReason
+from pymutekiu.hle.heap import Heap
+from pymutekiu.hle.errno import GuestOSError, ErrnoNamespace, ErrnoCauseUser
 
 
 class ThreadDescriptorTest(unittest.TestCase):
@@ -246,14 +248,18 @@ class SchedulerTestWithMock(unittest.TestCase):
         self._uc.mem_map(0x10000000, 4096)
 
     def test_new_thread(self):
+        """
+        Should create a new thread with all default optional parameters.
+        """
         expected_stack_bottom = 0xff000000
         expected_stack_top = expected_stack_bottom - 0x8000
         expected_stack_guard_top = expected_stack_top - 4096
 
         sched = Scheduler(self._uc, self._mock_states)
         thr = sched.new_thread(0xcafe0000)
-        # Thread should be allocated on the allocated memory address.
+        # Thread should be allocated on the allocated memory address with the correct size.
         self.assertEqual(thr, 0x10000000)
+        cast(mock.MagicMock, self._mock_states.heap.malloc).assert_called_once_with(ThreadDescriptor.sizeof())
 
         desc = ThreadDescriptor.from_bytes(self._uc.mem_read(thr, ThreadDescriptor.sizeof()))
 
@@ -273,6 +279,18 @@ class SchedulerTestWithMock(unittest.TestCase):
             (expected_stack_guard_top, expected_stack_top - 1, UC_PROT_NONE), mem_map,
             'Stack guard page not allocated.',
         )
+
+    def test_move_thread_to_slot(self):
+        """
+        Should move the thread to a new slot.
+        """
+        sched = Scheduler(self._uc, self._mock_states)
+        thr = sched.new_thread(0xcafe0000)
+        sched.move_thread_to_slot(thr, 15)
+
+        self.assertEqual(sched.get_slot(15), thr, 'Thread slot not properly set.')
+        desc = sched.read_thread_descriptor(thr)
+        self.assertEqual(desc.slot, 15, 'Thread descriptor not updated.')
 
     def test_delete_thread(self):
         """
@@ -309,12 +327,18 @@ class SchedulerTestWithMock(unittest.TestCase):
         self.assertEqual(sched.current_thread, thr)
 
     def test_get_set_errno(self):
+        """
+        Should be able to set the errno value on teh descriptor and read it back.
+        """
         sched = Scheduler(self._uc, self._mock_states)
         thr = sched.new_thread(0xcafe0000)
         sched.set_errno(0x11223344)
         self.assertEqual(sched.get_errno(), 0x11223344)
 
     def test_yield_from_svc(self):
+        """
+        Should reconfigure the emulator state from a syscall to a normal function call and stop the emulation.
+        """
         sched = Scheduler(self._uc, self._mock_states)
 
         # Values
@@ -354,6 +378,9 @@ class SchedulerTestWithMock(unittest.TestCase):
         self.assertEqual(sched.yield_request_num, 0x10000, 'Wrong request number.')
 
     def test_request_sleep_from_syscall(self):
+        """
+        Should put the thread to sleep.
+        """
         sched = Scheduler(self._uc, self._mock_states)
 
         # Create the current thread
@@ -365,4 +392,91 @@ class SchedulerTestWithMock(unittest.TestCase):
         self.assertEqual(desc.sleep_counter, 100, 'Unexpected sleep counter value.')
 
 
-# TODO Scheduler - With partially mocked Unicorn and real heap.
+class SchedulerWithRealHeap(unittest.TestCase):
+    """
+    Scheduler - With partially mocked Unicorn and real heap.
+    """
+    def setUp(self):
+        self._heap_base = 0x10000000
+        self._uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
+        self._uc.ctl_set_cpu_model(UC_CPU_ARM_926)
+
+        # Stub some functions
+        # Unicorn
+        self._uc.emu_start = mock.MagicMock()
+        self._uc.emu_stop = mock.MagicMock()
+
+        # OSStates
+        self._mock_states = mock.MagicMock()
+        self._mock_states.loader.main_module.mem_range = [0, self._heap_base]
+        self._mock_states.heap = Heap(self._uc, self._mock_states, 4096, 4096)
+
+    def test_new_thread_multiple(self):
+        expected_stack_bottom_1 = 0xff000000
+        expected_stack_top_1 = expected_stack_bottom_1 - 0x8000
+        expected_stack_guard_top_1 = expected_stack_top_1 - 4096
+
+        expected_stack_bottom_2 = expected_stack_guard_top_1
+        expected_stack_top_2 = expected_stack_bottom_2 - 0x10000
+        expected_stack_guard_top_2 = expected_stack_top_2 - 4096
+
+        sched = Scheduler(self._uc, self._mock_states)
+        thr1 = sched.new_thread(0xcafe0000)
+        thr2 = sched.new_thread(0xdecafe00, user_data=0xdeadcafe, stack_size=0x10000)
+
+        desc1 = ThreadDescriptor.from_bytes(self._uc.mem_read(thr1, ThreadDescriptor.sizeof()))
+        desc2 = ThreadDescriptor.from_bytes(self._uc.mem_read(thr2, ThreadDescriptor.sizeof()))
+        ctx1 = CPUContext.from_bytes(self._uc.mem_read(desc1.sp, CPUContext.sizeof()))
+        ctx2 = CPUContext.from_bytes(self._uc.mem_read(desc2.sp, CPUContext.sizeof()))
+
+        # Check thread descriptor values.
+        self.assertEqual(desc1.sp, expected_stack_bottom_1 - CPUContext.sizeof())
+        self.assertEqual(desc1.thread_func_ptr, 0xcafe0000)
+        self.assertEqual(desc1.stack, expected_stack_top_1)
+        self.assertEqual(desc2.sp, expected_stack_bottom_2 - CPUContext.sizeof())
+        self.assertEqual(desc2.thread_func_ptr, 0xdecafe00)
+        self.assertEqual(desc2.stack, expected_stack_top_2)
+
+        self.assertEqual(ctx1.pc, 0xcafe0000, 'Function address not passed to thread descriptor 1 CPU context.')
+        self.assertEqual(ctx1.r0, 0x0, 'User data not passed to thread descriptor 1 CPU context.')
+        self.assertEqual(ctx2.pc, 0xdecafe00, 'Function address not passed to thread descriptor 2 CPU context.')
+        self.assertEqual(ctx2.r0, 0xdeadcafe, 'User data not passed to thread descriptor 2 CPU context.')
+
+        # Check memory map (double inclusive)
+        mem_map = tuple(self._uc.mem_regions())
+        self.assertEqual(len(mem_map), 5, 'Unexpected # of memory maps.')
+        self.assertIn(
+            (expected_stack_top_1, expected_stack_bottom_1 - 1, UC_PROT_READ | UC_PROT_WRITE), mem_map,
+            'Stack 1 not allocated.',
+        )
+        self.assertIn(
+            (expected_stack_guard_top_1, expected_stack_top_1 - 1, UC_PROT_NONE), mem_map,
+            'Stack guard page 1 not allocated.',
+        )
+        self.assertIn(
+            (expected_stack_top_2, expected_stack_bottom_2 - 1, UC_PROT_READ | UC_PROT_WRITE), mem_map,
+            'Stack 2 not allocated.',
+        )
+        self.assertIn(
+            (expected_stack_guard_top_2, expected_stack_top_2 - 1, UC_PROT_NONE), mem_map,
+            'Stack guard page 2 not allocated.',
+        )
+
+    def test_exception_move_to_occupied_slot(self):
+        """
+        Should raise an exception when moving to a slot that's occupied without changing the slots.
+        """
+        sched = Scheduler(self._uc, self._mock_states)
+        thr1 = sched.new_thread(0xcafe0000)
+        thr2 = sched.new_thread(0xdecafe00)
+        with self.assertRaises(GuestOSError) as cm:
+            sched.move_thread_to_slot(thr1, 9)
+
+        self.assertEqual(cm.exception.namespace, ErrnoNamespace.USER, 'Wrong errno namespace.')
+        self.assertEqual(cm.exception.cause, ErrnoCauseUser.THREADING_SLOT_IN_USE, 'Wrong errno cause.')
+        self.assertEqual(sched.get_slot(8), thr1, 'Thread 1 moved.')
+        self.assertEqual(sched.get_slot(9), thr2, 'Thread 2 moved.')
+        desc1 = sched.read_thread_descriptor(thr1)
+        desc2 = sched.read_thread_descriptor(thr2)
+        self.assertEqual(desc1.slot, 8, 'Thread descriptor 1 updated unexpectedly.')
+        self.assertEqual(desc2.slot, 9, 'Thread descriptor 2 updated unexpectedly.')

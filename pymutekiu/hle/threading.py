@@ -101,7 +101,7 @@ class ThreadDescriptor:
     unk_0x34: bytes = b'\x00' * 0x20
     "Unknown and seems to be uninitialized."
 
-    _STRUCT = struct.Struct('<iIIiiIIhHhh4bI2I32s')
+    _STRUCT = struct.Struct('<iIIiiIIhHhh2b2BI2I32s')
 
     @classmethod
     def from_bytes(cls, data: bytes) -> 'ThreadDescriptor':
@@ -125,6 +125,10 @@ class ThreadDescriptor:
         self.slot_high3b = (slot >> 3) & 0b111
         self.slot_low3b_bit = 1 << self.slot_low3b
         self.slot_high3b_bit = 1 << self.slot_high3b
+
+    def validate(self):
+        if self.magic != 0x100:
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
 
 
 @dataclass
@@ -469,6 +473,7 @@ class Scheduler:
         :param addr: Guest pointer to the thread descriptor.
         """
         desc = self.read_thread_descriptor(addr)
+        desc.validate()
 
         # Splice the linked list
         if desc.prev != 0:
@@ -514,7 +519,8 @@ class Scheduler:
 
     def get_slot(self, slot: int) -> Optional[int]:
         """
-        Directly get the pointer saved in a slot. This is mostly for debugging and in most cases it's not needed.
+        Directly get the pointer saved in a slot. This is mostly for debugging/logging, and it's normally not needed
+        during normal emulator operation.
         :param slot: Slot number.
         :return: Guest pointer to the thread descriptor, or None if the slot is not set.
         """
@@ -522,13 +528,35 @@ class Scheduler:
 
     def set_slot(self, slot: int, thr: Optional[int]) -> None:
         """
-        Directly set a slot. This is mostly for debugging and in most cases it's not needed.
+        Directly set a slot. This is mostly for debugging, and it's normally not needed during normal emulator
+        operation.
 
         Unlike register(), this will not synchronize the slot number saved on the descriptor nor change the mask.
         :param slot: Slot number.
         :param thr: Guest pointer to a thread descriptor.
         """
         self._slots[slot] = thr
+
+    def move_thread_to_slot(self, thr: int, new_slot: int) -> None:
+        """
+        Move a thread from its current slot to another, effectively changing its priority.
+        :param thr: Guest pointer to thread descriptor.
+        :param new_slot: New slot.
+        """
+        if self._slots[new_slot] is not None:
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_SLOT_IN_USE)
+
+        desc = self.read_thread_descriptor(thr)
+        desc.validate()
+        if desc.slot == new_slot:
+            return
+
+        self.unregister(desc.slot)
+
+        desc.set_slot(new_slot)
+
+        self.write_thread_descriptor(thr, desc)
+        self._register_no_check(new_slot, thr, True)
 
     def read_thread_descriptor_by_slot(self, slot: int) -> Optional[ThreadDescriptor]:
         """
@@ -551,8 +579,9 @@ class Scheduler:
         :param unmask: Also unmask the registered thread and make it executable on next scheduler tick.
         """
         desc = self.read_thread_descriptor(thr)
+        desc.validate()
         if self._slots[desc.slot] is not None:
-            raise RuntimeError('Slot already in use.')
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_SLOT_IN_USE)
         self._register_no_check(desc.slot, thr, unmask)
 
     def unregister(self, slot: int):
