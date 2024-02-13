@@ -22,7 +22,7 @@ class Threading(SyscallModule):
         self._states.sched.delete_thread(thr)
         return 0
 
-    @syscalldef(0x10002, 'bool', ['uint32', 'short'])
+    @syscalldef(0x10002, 'bool', ['pointer', 'short'])
     def OSSetThreadPriority(self, thr: int, new_slot: int) -> bool:
         try:
             self._states.sched.move_thread_to_slot(thr, new_slot)
@@ -31,7 +31,7 @@ class Threading(SyscallModule):
             return False
         return True
 
-    @syscalldef(0x10003, 'short', ['uint32'])
+    @syscalldef(0x10003, 'short', ['pointer'])
     def OSGetThreadPriority(self, thr: int) -> int:
         try:
             if thr == 0:
@@ -51,6 +51,6 @@ class Threading(SyscallModule):
         self._states.sched.delete_thread(thr)
         return 0
 
-    @syscalldef(0x10008, 'void', ['int16'])
-    def OSSleep(self, millis: int):
+    @syscalldef(0x10008, 'void', ['short'])
+    def OSSleep(self, millis: int) -> None:
         self._states.sched.request_sleep_from_syscall(millis)

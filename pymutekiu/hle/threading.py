@@ -386,7 +386,6 @@ class Scheduler:
     def find_empty_normal_slot(self) -> int:
         """
         Finds the next empty normal slot.
-
         :return: The next empty normal slot.
         """
         slot_found: Optional[int] = None
