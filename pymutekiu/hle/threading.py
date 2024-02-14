@@ -54,6 +54,7 @@ class ThreadWaitReason(enum.IntFlag):
     SUSPEND = 0x8
     CRITICAL_SECTION = 0x10
     SLEEP = 0x20
+    ANY = SEMAPHORE | EVENT | QUEUE | SUSPEND | CRITICAL_SECTION | SLEEP
 
 
 @dataclass
@@ -704,11 +705,11 @@ class Scheduler:
         self._yield_request_num = syscall_no
         self._uc.emu_stop()
 
-    def request_sleep_from_syscall(self, jiffies: int):
+    def request_sleep_from_syscall(self, jiffies: int) -> None:
         """
-        Sets the sleep counter and reschedule. Returns immediately when requesting 0 jiffy.
+        Sets the sleep counter on current thread and reschedule. Returns immediately when requesting 0 jiffy.
 
-        This method should be called in a syscall handler.
+        This method should be called in a guest request handler.
         :param jiffies: Number of jiffies to sleep.
         """
         if jiffies == 0:
@@ -726,6 +727,59 @@ class Scheduler:
         self.write_thread_descriptor(self.current_thread, desc)
 
         self.switch()
+
+    def request_suspend(self, thr: int) -> None:
+        """
+        Request to suspend a running thread.
+
+        This method should be called in a guest request handler.
+        :param thr: Guest pointer to a thread descriptor.
+        """
+        if thr == 0:
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
+
+        desc = self.read_thread_descriptor(thr)
+        desc.validate()
+        desc.wait_reason |= ThreadWaitReason.SUSPEND
+        self._masks.mask(desc.slot)
+        self.write_thread_descriptor(thr, desc)
+
+        if self._current_slot == desc.slot:
+            self.switch()
+
+    def request_resume(self, thr: int) -> None:
+        """
+        Request to resume a suspended thread.
+
+        This method should be called in a guest request handler.
+        :param thr: Guest pointer to a thread descriptor.
+        """
+        if thr == 0:
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
+
+        desc = self.read_thread_descriptor(thr)
+        desc.validate()
+
+        if not (desc.wait_reason & ThreadWaitReason.SUSPEND):
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_THREAD_NOT_SUSPENDED)
+        desc.wait_reason &= (~ThreadWaitReason.SUSPEND) & 0xffffffff
+        self.write_thread_descriptor(thr, desc)
+
+        # Reschedule if needed
+        # In uC/OS-II this part will simply be
+        # if not (desc.wait_reason & ThreadWaitReason.ANY) and desc.sleep_counter == 0:
+        #     self._masks.unmask(desc.slot)
+        #     self.switch()
+        # However Besta RTOS seems to check everything other than SLEEP and if they are all unset, do some random
+        # shenanigans to unk_0x1c and clears the SLEEP flag without clearing the actual counter. Strange...
+        if not (desc.wait_reason & (~ThreadWaitReason.SLEEP)):
+            self._masks.unmask(desc.slot)
+            # TODO wth is this
+            desc.unk_0x1c = (64 - desc.slot) // 16 + 1 if desc.slot < 64 else (64 - desc.slot + 15) // 16 + 1
+            desc.wait_reason &= (~ThreadWaitReason.SLEEP) & 0xffffffff
+            self.write_thread_descriptor(thr, desc)
+            self.switch()
+
 
     def _sched_tick_intr(self):
         """

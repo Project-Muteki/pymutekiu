@@ -1,3 +1,4 @@
+import math
 from typing import cast
 import unittest
 import unittest.mock as mock
@@ -108,3 +109,29 @@ class Experiments(unittest.TestCase):
         self._uc.emu_start(code_page, 0)
 
         self.assertEqual(self._uc.reg_read(UC_ARM_REG_PC) - 4, code_page, 'pc not properly set.')
+
+    def test_0x1c_shenanigans(self):
+        """
+        unk_0x1c shenanigans in OSResumeThread.
+        """
+        code_page = 0x10000000
+        code, ninst = self._ks.asm(
+            'rsb r1, r1, 0x40;'
+            'asr r2, r1, 0x1f;'
+            'add r1, r1, r2, lsr #28;'
+            'mov r2, 1;'
+            'add r1, r2, r1, asr #4',
+            code_page,
+            as_bytes=True,
+        )
+
+        self._uc.mem_map(code_page, 4096, UC_PROT_READ | UC_PROT_EXEC)
+        self._uc.mem_write(code_page, code)
+
+        result = []
+        for i in range(65536):
+            self._uc.reg_write(UC_ARM_REG_R1, i)
+            self._uc.emu_start(code_page, 0, count=ninst)
+            ret = self._uc.reg_read(UC_ARM_REG_R1)
+            result.append(int.from_bytes(ret.to_bytes(4, 'little'), 'little', signed=True))
+        self.assertListEqual(result, [(64 - i) // 16 + 1 if i < 64 else (64 - i + 15) // 16 + 1 for i in range(65536)])
