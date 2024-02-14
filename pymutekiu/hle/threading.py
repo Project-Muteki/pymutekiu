@@ -461,7 +461,7 @@ class Scheduler:
 
         self.write_thread_descriptor(thr_ptr, desc)
 
-        self._register_no_check(slot, thr_ptr, not defer_start)
+        self.set_slot(slot, thr_ptr, not defer_start)
         if not defer_start:
             self.switch()
 
@@ -521,23 +521,28 @@ class Scheduler:
 
     def get_slot(self, slot: int) -> Optional[int]:
         """
-        Directly get the pointer saved in a slot. This is mostly for debugging/logging, and it's normally not needed
-        during normal emulator operation.
+        Directly get the pointer saved in a slot. This is exposed mostly for debugging/tracing, and it's normally not
+        needed to call this directly during normal emulator operation.
+
+        TODO: Replace this with an actual tracing API that also collects other stats of threads
         :param slot: Slot number.
         :return: Guest pointer to the thread descriptor, or None if the slot is not set.
         """
         return self._slots[slot]
 
-    def set_slot(self, slot: int, thr: Optional[int]) -> None:
+    def set_slot(self, slot: int, thr: int, unmask: bool = False):
         """
-        Directly set a slot. This is mostly for debugging, and it's normally not needed during normal emulator
-        operation.
+        Directly set a slot. This is exposed mostly for debugging, and it's normally not needed to call this directly
+        during normal emulator operation.
 
         Unlike register(), this will not synchronize the slot number saved on the descriptor nor change the mask.
         :param slot: Slot number.
         :param thr: Guest pointer to a thread descriptor.
+        :param unmask: Whether to also unmask the slot.
         """
         self._slots[slot] = thr
+        if unmask:
+            self._masks.unmask(slot)
 
     def move_thread_to_slot(self, thr: int, new_slot: int) -> None:
         """
@@ -558,7 +563,7 @@ class Scheduler:
         desc.set_slot(new_slot)
 
         self.write_thread_descriptor(thr, desc)
-        self._register_no_check(new_slot, thr, True)
+        self.set_slot(new_slot, thr, True)
 
     def read_thread_descriptor_by_slot(self, slot: int) -> Optional[ThreadDescriptor]:
         """
@@ -568,11 +573,6 @@ class Scheduler:
         """
         thr = self._slots[slot]
         return self.read_thread_descriptor(thr) if thr is not None else None
-
-    def _register_no_check(self, slot: int, thr: int, unmask: bool):
-        self._slots[slot] = thr
-        if unmask:
-            self._masks.unmask(slot)
 
     def register(self, thr: int, unmask: bool = True):
         """
@@ -586,7 +586,7 @@ class Scheduler:
         desc.validate()
         if self._slots[desc.slot] is not None:
             raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_SLOT_IN_USE)
-        self._register_no_check(desc.slot, thr, unmask)
+        self.set_slot(desc.slot, thr, unmask)
 
     def unregister(self, slot: int):
         """
