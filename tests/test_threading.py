@@ -409,7 +409,7 @@ class SchedulerTestWithMock(unittest.TestCase):
 
     def test_request_suspend(self):
         """
-        Should wake up the thread.
+        Should suspend the thread (set the SUSPEND flag and unschedule).
         """
         sched = Scheduler(self._uc, self._mock_states)
 
@@ -424,7 +424,7 @@ class SchedulerTestWithMock(unittest.TestCase):
 
     def test_request_resume(self):
         """
-        Should wake up the thread.
+        Should resume the thread (clear the SUSPEND flag and reschedule).
         """
         sched = Scheduler(self._uc, self._mock_states)
 
