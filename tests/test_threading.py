@@ -377,7 +377,7 @@ class SchedulerTestWithMock(unittest.TestCase):
         self.assertEqual(sched.yield_reason, YieldReason.REQUEST_SYSCALL, 'Wrong yield reason.')
         self.assertEqual(sched.yield_request_num, 0x10000, 'Wrong request number.')
 
-    def test_request_sleep_from_syscall(self):
+    def test_request_sleep(self):
         """
         Should put the thread to sleep.
         """
@@ -386,11 +386,57 @@ class SchedulerTestWithMock(unittest.TestCase):
         # Create the current thread
         thr = sched.new_thread(0xcafe0000)
 
-        sched.request_sleep_from_syscall(100)
+        sched.request_sleep(100)
         desc = sched.read_thread_descriptor(thr)
         self.assertEqual(desc.wait_reason, ThreadWaitReason.SLEEP, 'Wrong wait reason.')
         self.assertEqual(desc.sleep_counter, 100, 'Unexpected sleep counter value.')
 
+    def test_request_wakeup(self):
+        """
+        Should wake up the thread.
+        """
+        sched = Scheduler(self._uc, self._mock_states)
+
+        # Create the current thread
+        thr = sched.new_thread(0xcafe0000)
+
+        sched.request_sleep(100)
+        sched.request_wakeup(thr)
+
+        desc = sched.read_thread_descriptor(thr)
+        self.assertEqual(desc.wait_reason, ThreadWaitReason.NONE, 'Wrong wait reason.')
+        self.assertEqual(desc.sleep_counter, 0, 'Unexpected sleep counter value.')
+
+    def test_request_suspend(self):
+        """
+        Should wake up the thread.
+        """
+        sched = Scheduler(self._uc, self._mock_states)
+
+        # Create the current thread
+        thr = sched.new_thread(0xcafe0000)
+
+        sched.request_suspend(thr)
+
+        desc = sched.read_thread_descriptor(thr)
+        self.assertEqual(desc.wait_reason, ThreadWaitReason.SUSPEND, 'Wrong wait reason.')
+        self.assertIsNone(sched.current_slot, 'Thread not unscheduled.')
+
+    def test_request_resume(self):
+        """
+        Should wake up the thread.
+        """
+        sched = Scheduler(self._uc, self._mock_states)
+
+        # Create the current thread
+        thr = sched.new_thread(0xcafe0000)
+
+        sched.request_suspend(thr)
+        sched.request_resume(thr)
+
+        desc = sched.read_thread_descriptor(thr)
+        self.assertEqual(desc.wait_reason, ThreadWaitReason.NONE, 'Wrong wait reason.')
+        self.assertEqual(sched.current_slot, desc.slot, 'Thread not scheduled.')
 
 class SchedulerWithRealHeap(unittest.TestCase):
     """

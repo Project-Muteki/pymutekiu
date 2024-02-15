@@ -127,6 +127,10 @@ class ThreadDescriptor:
         self.slot_low3b_bit = 1 << self.slot_low3b
         self.slot_high3b_bit = 1 << self.slot_high3b
 
+    def populate_unk_0x1c(self):
+        # TODO wth is this
+        self.unk_0x1c = (64 - self.slot) // 16 + 1 if self.slot < 64 else (64 - self.slot + 15) // 16 + 1
+
     def validate(self):
         if self.magic != 0x100:
             raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
@@ -705,11 +709,11 @@ class Scheduler:
         self._yield_request_num = syscall_no
         self._uc.emu_stop()
 
-    def request_sleep_from_syscall(self, jiffies: int) -> None:
+    def request_sleep(self, jiffies: int) -> None:
         """
         Sets the sleep counter on current thread and reschedule. Returns immediately when requesting 0 jiffy.
 
-        This method should be called in a guest request handler.
+        This method should be called from a guest request handler.
         :param jiffies: Number of jiffies to sleep.
         """
         if jiffies == 0:
@@ -728,11 +732,35 @@ class Scheduler:
 
         self.switch()
 
+    def request_wakeup(self, thr: int):
+        """
+        Request to wake up a thread (canceling sleep).
+
+        This method should be called from a guest request handler.
+        :param thr: Guest pointer to a thread descriptor.
+        """
+        if thr == 0:
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
+
+        desc = self.read_thread_descriptor(thr)
+        desc.validate()
+
+        if desc.sleep_counter == 0:
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_THREAD_NOT_SLEEPING)
+
+        desc.sleep_counter = 0
+        desc.wait_reason &= ~ThreadWaitReason.SLEEP
+        self.write_thread_descriptor(thr, desc)
+
+        if not (desc.wait_reason & ThreadWaitReason.SUSPEND):
+            self._masks.unmask(desc.slot)
+            self.switch()
+
     def request_suspend(self, thr: int) -> None:
         """
         Request to suspend a running thread.
 
-        This method should be called in a guest request handler.
+        This method should be called from a guest request handler.
         :param thr: Guest pointer to a thread descriptor.
         """
         if thr == 0:
@@ -751,7 +779,7 @@ class Scheduler:
         """
         Request to resume a suspended thread.
 
-        This method should be called in a guest request handler.
+        This method should be called from a guest request handler.
         :param thr: Guest pointer to a thread descriptor.
         """
         if thr == 0:
@@ -762,7 +790,7 @@ class Scheduler:
 
         if not (desc.wait_reason & ThreadWaitReason.SUSPEND):
             raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_THREAD_NOT_SUSPENDED)
-        desc.wait_reason &= (~ThreadWaitReason.SUSPEND) & 0xffffffff
+        desc.wait_reason &= ~ThreadWaitReason.SUSPEND
         self.write_thread_descriptor(thr, desc)
 
         # Reschedule if needed
@@ -772,14 +800,20 @@ class Scheduler:
         #     self.switch()
         # However Besta RTOS seems to check everything other than SLEEP and if they are all unset, do some random
         # shenanigans to unk_0x1c and clears the SLEEP flag without clearing the actual counter. Strange...
-        if not (desc.wait_reason & (~ThreadWaitReason.SLEEP)):
+
+        # if not (desc.wait_reason & (~ThreadWaitReason.SLEEP)):
+        #     self._masks.unmask(desc.slot)
+        #     desc.populate_unk_0x1c()
+        #     desc.wait_reason &= ~ThreadWaitReason.SLEEP
+        #     self.write_thread_descriptor(thr, desc)
+        #     self.switch()
+
+        # TODO something doesn't add up. Use uC/OS-II behavior here for now.
+        if not (desc.wait_reason & ThreadWaitReason.ANY) and desc.sleep_counter == 0:
             self._masks.unmask(desc.slot)
-            # TODO wth is this
-            desc.unk_0x1c = (64 - desc.slot) // 16 + 1 if desc.slot < 64 else (64 - desc.slot + 15) // 16 + 1
-            desc.wait_reason &= (~ThreadWaitReason.SLEEP) & 0xffffffff
+            #desc.populate_unk_0x1c()
             self.write_thread_descriptor(thr, desc)
             self.switch()
-
 
     def _sched_tick_intr(self):
         """
@@ -799,6 +833,7 @@ class Scheduler:
 
             desc = self.read_thread_descriptor(thr)
             assert desc.slot == slot, 'Slot number inconsistent. Possible corruption.'
+            commit_descriptor = False
 
             # Update sleep counter
             if desc.wait_reason & ThreadWaitReason.SLEEP:
@@ -806,10 +841,15 @@ class Scheduler:
                 if desc.sleep_counter <= 0:
                     desc.sleep_counter = 0
                     desc.wait_reason &= ~ThreadWaitReason.SLEEP
-                self.write_thread_descriptor(thr, desc)
+                commit_descriptor = True
 
             if desc.wait_reason == ThreadWaitReason.NONE:
                 self._masks.unmask(slot)
+                #desc.populate_unk_0x1c()
+                commit_descriptor = True
+
+            if commit_descriptor:
+                self.write_thread_descriptor(thr, desc)
 
         # Perform a context switch if needed.
         self.switch()

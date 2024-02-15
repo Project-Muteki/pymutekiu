@@ -53,4 +53,4 @@ class Threading(SyscallModule):
 
     @syscalldef(0x10008, 'void', ['short'])
     def OSSleep(self, millis: int) -> None:
-        self._states.sched.request_sleep_from_syscall(millis)
+        self._states.sched.request_sleep(millis)

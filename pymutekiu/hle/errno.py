@@ -17,6 +17,7 @@ class ErrnoCauseUser(enum.IntEnum):
     THREADING_SLOT_IN_USE = 0x0028
     THREADING_SLOT_FULL = 0x002b
     THREADING_STRUCT_MALLOC_FAILED = 0x0046
+    THREADING_THREAD_NOT_SLEEPING = 0x0050
     THREADING_THREAD_NOT_SUSPENDED = 0x0065
     THREADING_STACK_MALLOC_FAILED = 0x0066
     THREADING_INVALID_DESCRIPTOR = 0x006e
@@ -157,6 +158,8 @@ STRERROR_USER: dict[ErrnoCauseUser, str] = {
     ErrnoCauseUser.THREADING_SLOT_IN_USE: 'Slot is already assigned to another thread.',
     ErrnoCauseUser.THREADING_SLOT_FULL: 'No normal priority slots left for new thread.',
     ErrnoCauseUser.THREADING_STRUCT_MALLOC_FAILED: 'Failed to allocate memory for new thread descriptor.',
+    ErrnoCauseUser.THREADING_THREAD_NOT_SLEEPING: 'Thread is not sleeping.',
+    ErrnoCauseUser.THREADING_THREAD_NOT_SUSPENDED: 'Thread is not suspended.',
     ErrnoCauseUser.THREADING_STACK_MALLOC_FAILED: 'Failed to allocate memory for stack.',
     ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR: 'Invalid thread descriptor.',
     ErrnoCauseUser.THREADING_DESCRIPTOR_BUSY: 'Event descriptor is busy.',
