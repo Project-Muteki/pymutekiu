@@ -8,6 +8,7 @@ from .heap import Heap
 
 if TYPE_CHECKING:
     from unicorn import Uc
+    from pathlib import Path
 
 
 class OSStates:
@@ -16,7 +17,7 @@ class OSStates:
     loader: Loader
     heap: Heap
 
-    def __init__(self, uc: 'Uc', main_applet_path: str):
+    def __init__(self, uc: 'Uc', main_applet_path: 'str | Path'):
         self._uc = uc
         # HACK: Cast away the ProxyType here. weakref.ProxyType[OSStates] for these components currently are typed
         # simply as OSStates because typing spec does not yet allow object wrapping.

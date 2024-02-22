@@ -6,6 +6,7 @@ from typing import (
 import logging
 
 from ...utils import GuestRequestHandler
+from ...data import SYSCALL_NAMES
 from .common import SyscallModule
 
 from .memory import Memory
@@ -31,4 +32,5 @@ class SyscallHandler(GuestRequestHandler[int]):
             self.register_guest_module(module_class(uc, states))
 
     def request_key_to_str(self, req_key: int) -> str:
-        return f'<syscall {req_key:#x}>'
+        syscall_name = SYSCALL_NAMES.get(req_key, f'{req_key:#x}')
+        return f'<syscall {syscall_name}>'

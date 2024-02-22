@@ -53,7 +53,7 @@ class Process:
     MAGIC_EXIT = 0xfffffffc
     MAGIC_EXIT_THREAD = 0xfffffff8
 
-    def __init__(self, main_applet_path: str, main_stack_size=0x8000, heap_size=0x2000000):
+    def __init__(self, main_applet_path: str | pathlib.Path, main_stack_size=0x8000, heap_size=0x2000000):
         self._uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
         self._uc.ctl_set_cpu_model(UC_CPU_ARM_926)
         self._states = OSStates(self._uc, main_applet_path)
