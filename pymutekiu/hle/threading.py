@@ -1,7 +1,8 @@
+from typing import TYPE_CHECKING, Optional, TypeVar, Any, cast
+from collections.abc import Sequence, Awaitable, Generator, Coroutine
+
 import enum
 import functools
-from typing import TYPE_CHECKING, Optional, Sequence
-
 import logging
 import struct
 import time
@@ -305,6 +306,100 @@ class YieldReason(enum.Enum):
     "Syscall request. The handler will then decide whether to continue execution or to reschedule."
     REQUEST_HLE_FUNC = enum.auto()
     "HLE function call. The handler will then decide whether to continue execution or to reschedule."
+    REQUEST_HANDLER_EVENT = enum.auto()
+    "Yield or return from an async request handler."
+    NO_THREAD = enum.auto()
+    "No thread registered."
+
+
+_ReturnT_co = TypeVar('_ReturnT_co', covariant=True)
+
+
+class LiteFuture(Awaitable[_ReturnT_co]):
+    """
+    Future class for use with Scheduler. It loosely follows the API of asyncio.Future with some features such as
+    callbacks missing.
+    """
+    _PENDING = 0
+    _FINISHED = 1
+    _CANCELLED = 2
+
+    _val: Optional[_ReturnT_co]
+    _exc: Optional[BaseException]
+    _state: int
+    _cancel_msg: Optional[str]
+
+    def __init__(self):
+        self._state = self._PENDING
+        self._ret = None
+        self._exc = None
+        self._cancel_msg = None
+
+    def cancel(self, msg: Optional[str] = None) -> bool:
+        if self.done():
+            return False
+        self._cancel_msg = msg
+        self._state = self._CANCELLED
+        return True
+
+    def cancelled(self) -> bool:
+        return self._state == self._CANCELLED
+
+    def done(self):
+        return self._state != self._PENDING
+
+    def result(self) -> _ReturnT_co:
+        if self.cancelled():
+            raise RuntimeError(self._cancel_msg)
+        if self._exc is not None:
+            raise self._exc
+        return self._ret
+
+    def set_result(self, val: _ReturnT_co):
+        self._val = val
+
+    def set_exception(self, exc: BaseException):
+        self._exc = exc
+
+    def __await__(self) -> Generator['LiteFuture', None, _ReturnT_co]:
+        if not self.done():
+            yield self
+        # Check against unexpected await exits
+        if not self.done():
+            raise RuntimeError('Exiting await when result is not ready. Possible scheduler bug?')
+        # Pass result/exception over to the coroutine
+        return self.result()
+
+
+@dataclass
+class SchedulerCoroutineTask:
+    cr: Coroutine[Any, Any, None]
+    "Scheduler coroutine."
+    aw: Optional[LiteFuture[Any]] = None
+    "Scheduler awaitable."
+    _exception: Optional[BaseException] = None
+    _done: bool = False
+
+    def tick(self) -> bool:
+        if self.aw is None or self.aw.done():
+            try:
+                aw = self.cr.send(None)
+                if not isinstance(aw, LiteFuture):
+                    self.cr.throw(RuntimeError(f'Unsupported awaitable type {type(aw)} used in request handler.'))
+                self.aw = cast(LiteFuture[Any], aw)
+            except StopIteration:
+                self._done = True
+            except BaseException as err:
+                self._exception = err
+                self._done = True
+        return self._done
+
+    def done(self) -> bool:
+        return self._done
+
+    def result(self) -> None:
+        if self._done and self._exception:
+            raise self._exception
 
 
 class Scheduler:
@@ -343,6 +438,7 @@ class Scheduler:
     _desc_tail: Optional[int]
     _yield_reason: Optional[YieldReason]
     _yield_request_num: Optional[int]
+    _pending_handlers: dict[int, SchedulerCoroutineTask]
 
     def __init__(self, uc: Uc, states: 'OSStates'):
         self._uc = uc
@@ -363,6 +459,8 @@ class Scheduler:
 
         self._yield_reason = None
         self._yield_request_num = None
+
+        self._pending_handlers = {}
 
     @property
     def current_slot(self) -> Optional[int]:
@@ -678,6 +776,14 @@ class Scheduler:
         if self._slots[slot] is None:
             raise ValueError(f'Slot {slot} is empty.')
 
+        # Resolve the request handler future linked to this slot
+        # The actual callback will not be performed here, instead it will be done in tick() before Unicorn resumes to
+        # keep the behavior consistent with the rest of the scheduler.
+        if slot in self._pending_handlers:
+            fut = self._pending_handlers[slot].aw
+            if fut is not None and not fut.done():
+                fut.set_result(None)
+
         # If the current thread is the same as the target, skip.
         if self._current_slot == slot:
             return False
@@ -731,6 +837,33 @@ class Scheduler:
         self.write_thread_descriptor(self.current_thread, desc)
 
         self.switch()
+
+    def sleep(self, jiffy: int) -> LiteFuture[None]:
+        """
+        Block an async request handler for the amount of jiffy specified.
+
+        This method should be called from a guest request handler.
+        :param jiffy: Number of jiffies to sleep.
+        :return: A `LiteFuture` instance that can be used with `await` in request handler coroutines
+        """
+        fut = LiteFuture()
+
+        # If requesting 0 jiffy, resolve and immediately return the future with no delay.
+        if jiffy == 0:
+            fut.set_result(None)
+            return fut
+
+        if self._current_slot in self._pending_handlers:
+            _logger.warning(
+                'Some request handler already awaiting on slot %d. Rejecting before starting a new one...',
+                self._current_slot
+            )
+            self._pending_handlers[self._current_slot].aw.set_exception(RuntimeError('Dual await cancelled.'))
+
+        # Actually request for sleep
+        self.request_sleep(jiffy)
+
+        return fut
 
     def request_wakeup(self, thr: int):
         """
@@ -815,6 +948,22 @@ class Scheduler:
             self.write_thread_descriptor(thr, desc)
             self.switch()
 
+    def run_coroutine(self, cr: Coroutine[Any, Any, None]) -> SchedulerCoroutineTask:
+        """
+        Inject a coroutine into the scheduler loop.
+
+        This will immediately run the coroutine synchronously until the first block. Then the rest of the coroutine
+        will be finished over time before the linked guest thread gets executed by the scheduler.
+        :param cr: A scheduler coroutine. Must return None.
+        :return: The task object corresponding to the coroutine.
+        """
+        if self._current_slot is None:
+            raise RuntimeError('No thread currently running.')
+        task = SchedulerCoroutineTask(cr)
+        if task.tick():
+            return task
+        self._pending_handlers[self._current_slot] = task
+
     def _sched_tick_intr(self):
         """
         Housekeeping routine that only runs when a new scheduler tick is being generated.
@@ -865,6 +1014,10 @@ class Scheduler:
         This method should be periodically called in the main loop **before** the top level syscall/HLE callback
         handler.
         """
+        if self._current_slot is None and not any(self._pending_handlers):
+            self._yield_reason = YieldReason.NO_THREAD
+            return
+
         # Run housekeeping
         self._sched_tick_intr()
 
@@ -880,6 +1033,12 @@ class Scheduler:
             if idling:
                 # No tasks to run. Idling until timeout.
                 time.sleep(remaining_time / 1_000_000)
+            elif self._current_slot in self._pending_handlers:
+                # Attempt to run a previous pending request handler
+                req_done = self._pending_handlers[self._current_slot].tick()
+                if req_done:
+                    del self._pending_handlers[self._current_slot]
+                self._yield_reason = YieldReason.REQUEST_HANDLER_EVENT
             else:
                 # Run emulator for up to the determined time remaining.
                 self._uc.emu_start(self._uc.reg_read(UC_ARM_REG_PC), 0, timeout=remaining_time)

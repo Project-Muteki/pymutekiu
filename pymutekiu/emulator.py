@@ -1,11 +1,9 @@
-import ctypes
 from typing import (
     Optional,
     Any,
 )
 
 import pathlib
-import dataclasses
 import logging
 
 from unicorn import (
@@ -13,15 +11,6 @@ from unicorn import (
     UcError,
     UC_ARCH_ARM,
     UC_MODE_ARM,
-    UC_PROT_NONE,
-    UC_PROT_ALL,
-    UC_PROT_READ,
-    UC_PROT_WRITE,
-    UC_PROT_EXEC,
-    UC_HOOK_MEM_INVALID,
-    UC_HOOK_MEM_FETCH_PROT,
-    UC_HOOK_MEM_READ_UNMAPPED,
-    UC_HOOK_CODE,
     UC_HOOK_INTR,
 )
 
@@ -44,35 +33,14 @@ from unicorn.arm_const import (
     UC_ARM_REG_R12,
     UC_CPU_ARM_926,
 )
-from pefile import PE
 
 from . import utils
 from .hle.states import OSStates
+from .hle.threading import YieldReason
 from .hle.syscall import SyscallHandler
 
 
 _logger = logging.getLogger('emulator')
-
-@dataclasses.dataclass
-class LoadedSection:
-    '''
-    Represent a section of a loaded module within the emulated memory space.
-    '''
-    name: str
-    addr: int
-    size: int
-    perm: int
-
-
-@dataclasses.dataclass
-class LoadedModule:
-    '''
-    Represent a loaded module within the emulated memory space.
-    '''
-    name: str
-    addr: int
-    size: int
-    sections: list[LoadedSection]
 
 
 class Process:
@@ -85,10 +53,10 @@ class Process:
     MAGIC_EXIT = 0xfffffffc
     MAGIC_EXIT_THREAD = 0xfffffff8
 
-    def __init__(self, main_stack_size=0x8000, heap_size=0x2000000):
+    def __init__(self, main_applet_path: str, main_stack_size=0x8000, heap_size=0x2000000):
         self._uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
         self._uc.ctl_set_cpu_model(UC_CPU_ARM_926)
-        self._states = OSStates(self._uc)
+        self._states = OSStates(self._uc, main_applet_path)
 
         if main_stack_size % 4096 != 0:
             _logger.warning('Main stack size is not a multiple of minimum page size.')
@@ -134,25 +102,36 @@ class Process:
             self._states.sched.yield_from_svc()
 
     def _emulator_loop(self):
-        ...
+        while True:
+            self._states.sched.tick()
+            match self._states.sched.yield_reason:
+                case YieldReason.NO_THREAD:
+                    _logger.debug('Applet exited. Quitting...')
+                    break
+                case YieldReason.REQUEST_SYSCALL:
+                    cr = self._syscall_handler.process_requests(self._states.sched.yield_request_num)
+                    if cr is not None:
+                        task = self._states.sched.run_coroutine(cr)
+                        # Propagate exception
+                        if task.done():
+                            task.result()
+                # TODO add handler for HLE callbacks
 
     def load(self, image_file: str | pathlib.Path) -> None:
         self._states.loader.load(image_file)
 
     def run(self):
-        # TODO set up stack and heap with threading and heap plugins
-        self._uc.mem_map(0xff000000 - self._main_stack_size, self._main_stack_size, UC_PROT_READ | UC_PROT_WRITE)
-        self._uc.mem_map(self._states.loader.main_module.mem_range[1], self._heap_size, UC_PROT_READ | UC_PROT_WRITE)
-        self._uc.reg_write(UC_ARM_REG_LR, self.MAGIC_EXIT)
-        self._uc.reg_write(UC_ARM_REG_SP, self.STACK_BASE)
-
+        self._states.sched.new_thread(
+            self._states.loader.entry_point,
+            stack_size=self._main_stack_size,
+        )
         # TODO setup exception handler
         #self._uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED, self._panic)
         #self._uc.hook_add(UC_HOOK_MEM_FETCH_PROT, self._panic)
         #self._uc.hook_add(UC_HOOK_CODE, self._trace_code)
-        #self._uc.hook_add(UC_HOOK_INTR, self._on_intr)
+        self._uc.hook_add(UC_HOOK_INTR, self._on_intr)
 
         for region_start, region_end, perm in self._uc.mem_regions():
             _logger.debug('%#010x-%#010x %s', region_start, region_end, utils.uc_perm_to_str(perm))
 
-        self._uc.emu_start(self._states.loader.entry_point, self.MAGIC_EXIT)
+        self._emulator_loop()

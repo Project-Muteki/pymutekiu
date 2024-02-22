@@ -29,3 +29,6 @@ class SyscallHandler(GuestRequestHandler[int]):
         super().__init__(uc, states)
         for module_class in self.ENABLED_MODULES:
             self.register_guest_module(module_class(uc, states))
+
+    def request_key_to_str(self, req_key: int) -> str:
+        return f'<syscall {req_key:#x}>'

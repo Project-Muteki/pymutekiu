@@ -16,11 +16,12 @@ class OSStates:
     loader: Loader
     heap: Heap
 
-    def __init__(self, uc: 'Uc'):
+    def __init__(self, uc: 'Uc', main_applet_path: str):
         self._uc = uc
         # HACK: Cast away the ProxyType here. weakref.ProxyType[OSStates] for these components currently are typed
         # simply as OSStates because typing spec does not yet allow object wrapping.
         self.sched = Scheduler(self._uc, cast('OSStates', weakref.proxy(self)))
         self.loader = Loader(self._uc, cast('OSStates', weakref.proxy(self)))
+        self.loader.load(main_applet_path)
         # TODO allow user to change optional configs
         self.heap = Heap(self._uc, cast('OSStates', weakref.proxy(self)), 2*1024*1024, 32*1024*1024)

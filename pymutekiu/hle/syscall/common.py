@@ -14,18 +14,15 @@ from ...utils import (
     ArgumentFormat,
     ArgumentType,
     GuestCallback,
-    GuestScalarValue,
 )
 
 if TYPE_CHECKING:
     from unicorn import Uc
     from ..states import OSStates
+    from ...utils import RespondToCoroutine, GuestFunction
 
 
 _logger = logging.getLogger('syscall')
-
-
-_T = TypeVar('_T', bound=Callable[..., GuestScalarValue])
 
 
 @dataclasses.dataclass
@@ -34,7 +31,7 @@ class SyscallDefinition:
     ret: ArgumentType
     args: ArgumentFormat
 
-    def __call__(self, f: _T) -> _T:
+    def __call__(self, f: 'GuestFunction') -> 'GuestFunction':
         setattr(f, 'syscalldef', self)
         return f
 
@@ -54,7 +51,7 @@ class SyscallModule:
         for name, handler in inspect.getmembers(self, lambda x: inspect.ismethod(x) and hasattr(x, 'syscalldef')):
             sdef = cast(SyscallDefinition, getattr(handler, 'syscalldef'))
             self._table[sdef.num] = GuestCallback(
-                callback=cast(Callable[..., Optional[float]], handler),
+                callback=cast('GuestFunction', handler),
                 return_type=sdef.ret,
                 arg_types=sdef.args,
             )
@@ -63,10 +60,8 @@ class SyscallModule:
     def available_keys(self) -> set[int]:
         return set(self._table)
 
-    def process(self, key: int) -> bool:
+    def process(self, key: int) -> 'Optional[RespondToCoroutine]':
         callback = self._table.get(key)
         if callback is None:
-            return False
-        callback.respond_to(self._uc)
-        return True
-
+            return
+        return callback.respond_to(self._uc)

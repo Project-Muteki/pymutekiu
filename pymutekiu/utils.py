@@ -7,15 +7,17 @@ from typing import (
     Literal,
     Optional,
     TypeVar,
-    Generic,
     Callable,
     Hashable,
     Protocol,
+    Any,
     TYPE_CHECKING,
+    cast,
 )
-from collections.abc import Iterator
+from collections.abc import Iterator, Coroutine
 
 import dataclasses
+import inspect
 import logging
 import struct
 
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
     from .hle.states import OSStates
 
 _logger_abi = logging.getLogger('abi')
+_logger_req = logging.getLogger('request_handler')
 
 ArgumentType = Literal[
     'void', 'pointer',
@@ -43,6 +46,7 @@ ArgumentType = Literal[
 ]
 VariadicArgumentType = Literal['...']
 
+FixedArgumentFormat = Sequence[ArgumentType]
 ArgumentFormat = Sequence[ArgumentType | VariadicArgumentType]
 GuestScalarValue = Optional[int | float | bool]
 Argument = GuestScalarValue
@@ -215,26 +219,34 @@ class MemPageTracker:
             self._tail = chunk
 
 
+RespondToCoroutine = Coroutine[Any, Any, None]
+GuestFunction = Callable[..., Coroutine[Any, Any, GuestScalarValue]] | Callable[..., GuestScalarValue]
+
+
 @dataclasses.dataclass
 class GuestCallback:
     """
     Guest callback wrapper.
     """
-    callback: Callable[..., GuestScalarValue]
+    callback: Optional[GuestFunction]
     return_type: ArgumentType
     arg_types: ArgumentFormat
 
-    def respond_to(self, uc: 'Uc'):
+    async def respond_to(self, uc: 'Uc') -> None:
         """
         Respond to a Unicorn context requesting a callback.
         :param uc: The Unicorn context.
-        :return:
         """
         reader = OABIArgReader(uc, self.arg_types)
         if not reader.has_variadic:
-            syscall_ret = self.callback(*reader.fixed_args)
+            handler_ret = self.callback(*reader.fixed_args)
         else:
-            syscall_ret = self.callback(*reader.fixed_args, reader)
+            handler_ret = self.callback(*reader.fixed_args, reader)
+
+        if inspect.isawaitable(handler_ret):
+            syscall_ret = await handler_ret
+        else:
+            syscall_ret = handler_ret
 
         # Convert and write return value.
         if self.return_type != 'void':
@@ -255,10 +267,10 @@ class GuestModule(Protocol[_TKey]):
     def available_keys(self) -> set[_TKey]:
         return set()
 
-    def process(self, key: _TKey) -> bool: ...
+    def process(self, key: _TKey) -> Optional[RespondToCoroutine]: ...
 
 
-class GuestRequestHandler(Generic[_TKey]):
+class GuestRequestHandler[_TKey]:
     _uc: 'Uc'
     _states: 'OSStates'
     _table: dict[_TKey, GuestModule[_TKey]]
@@ -270,11 +282,16 @@ class GuestRequestHandler(Generic[_TKey]):
         self._table = {}
         self._modules = []
 
-    def process_requests(self, req_key: _TKey) -> bool:
+    def request_key_to_str(self, req_key: _TKey):
+        return str(req_key)
+
+    def process_requests(self, req_key: _TKey) -> Optional[RespondToCoroutine]:
         module = self._table.get(req_key)
         if module is not None:
+            _logger_req.debug('%s', self.request_key_to_str(req_key))
             return module.process(req_key)
-        return False
+        _logger_req.error('Unhandled guest request %s', self.request_key_to_str(req_key))
+        return
 
     def register_guest_module(self, module: GuestModule[_TKey]) -> int:
         conflicting_keys = module.available_keys.intersection(self._table)
@@ -387,11 +404,11 @@ class OABIArgReader:
     https://developer.arm.com/documentation/dui0041/c/ARM-Procedure-Call-Standard/About-the-ARM-Procedure-Call-Standard
     """
     _uc: 'Uc'
-    _fmt: ArgumentFormat
+    _fmt: FixedArgumentFormat
     _stack_base: int
     _candidate_id: int
     _variadic_base: Optional[int]
-    _fixed_args: Optional[tuple[Argument]]
+    _fixed_args: Optional[tuple[Argument, ...]]
 
     def __init__(self, uc: 'Uc', fmt: ArgumentFormat):
         """
@@ -410,7 +427,7 @@ class OABIArgReader:
             self._variadic_base = None
 
         self._uc = uc
-        self._fmt = fmt_no_variadic
+        self._fmt = cast(FixedArgumentFormat, fmt_no_variadic)
         self._stack_base = uc.reg_read(UC_ARM_REG_SP)
         self._candidate_id = 0
         self._fixed_args = None
@@ -433,7 +450,7 @@ class OABIArgReader:
             self._candidate_id += 1
         return guest_type_from_bytes(arg_type, candidates)
 
-    def _read_arg_list(self, fmt: ArgumentFormat) -> list[Argument]:
+    def _read_arg_list(self, fmt: FixedArgumentFormat) -> list[Argument]:
         result: list[Argument] = []
         for i, arg_type in enumerate(fmt):
             try:
@@ -455,7 +472,7 @@ class OABIArgReader:
         return self._variadic_base is not None
 
     @property
-    def fixed_args(self) -> tuple[Argument]:
+    def fixed_args(self) -> tuple[Argument, ...]:
         """
         Obtain fixed arguments.
         :return: Fixed arguments.
@@ -471,7 +488,7 @@ class OABIArgReader:
         """
         return self._read_arg(arg_type)
 
-    def read_variadic_list(self, fmt: ArgumentFormat) -> tuple[Argument]:
+    def read_variadic_list(self, fmt: FixedArgumentFormat) -> tuple[Argument, ...]:
         """
         Read a list of variadic arguments.
         :param fmt: Format list for variadic arguments.

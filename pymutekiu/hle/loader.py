@@ -107,6 +107,10 @@ class Loader:
             except UnicodeDecodeError:
                 section_name_str = ''
 
+            if section.Misc_VirtualSize == 0:
+                _logger.debug('Skip empty section %s', section_name_str)
+                continue
+
             addr = image_base + section.VirtualAddress_adj
             perm = UC_PROT_READ if section.IMAGE_SCN_MEM_READ else 0
             perm |= UC_PROT_WRITE if section.IMAGE_SCN_MEM_WRITE else 0

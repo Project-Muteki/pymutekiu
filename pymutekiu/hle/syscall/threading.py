@@ -52,5 +52,5 @@ class Threading(SyscallModule):
         return 0
 
     @syscalldef(0x10008, 'void', ['short'])
-    def OSSleep(self, millis: int) -> None:
-        self._states.sched.request_sleep(millis)
+    async def OSSleep(self, millis: int) -> None:
+        await self._states.sched.sleep(millis)

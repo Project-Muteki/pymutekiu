@@ -14,8 +14,7 @@ def parse_args() -> tuple[ArgumentParser, Namespace]:
 
 def main():
     parser, args = parse_args()
-    emu = emulator.Process()
-    emu.load(args.exe)
+    emu = emulator.Process(args.exe)
     emu.run()
 
 if __name__ == '__main__':
