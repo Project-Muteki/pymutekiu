@@ -9,20 +9,41 @@ from .heap import Heap
 if TYPE_CHECKING:
     from unicorn import Uc
     from pathlib import Path
+    from argparse import Namespace
 
 
 class OSStates:
+    """
+    Operating system state tracker class. Keeps track on loaded code and runtime states like scheduler and memory
+    allocation. It also provides access to states for its children.
+    """
     _uc: 'Uc'
+    config: 'Namespace'
+
     sched: Scheduler
     loader: Loader
     heap: Heap
 
-    def __init__(self, uc: 'Uc', main_applet_path: 'str | Path'):
+    def __init__(self, uc: 'Uc', main_applet_path: 'str | Path', config: 'Namespace'):
+        """
+        Initialize the object and its children.
+        :param uc: Unicorn context.
+        :param main_applet_path: Main applet executable. It will be loaded to the corresponding memory address
+        **without** relocation and be used to determine memory layout and emulator entry point.
+        """
         self._uc = uc
+        self.config = config
         # HACK: Cast away the ProxyType here. weakref.ProxyType[OSStates] for these components currently are typed
         # simply as OSStates because typing spec does not yet allow object wrapping.
         self.sched = Scheduler(self._uc, cast('OSStates', weakref.proxy(self)))
         self.loader = Loader(self._uc, cast('OSStates', weakref.proxy(self)))
+        # Load main applet. Must be done before heap initialization.
         self.loader.load(main_applet_path)
         # TODO allow user to change optional configs
-        self.heap = Heap(self._uc, cast('OSStates', weakref.proxy(self)), 2*1024*1024, 32*1024*1024)
+        self.heap = Heap(
+            self._uc,
+            cast('OSStates', weakref.proxy(self)),
+            config.min_heap_unit,
+            config.max_heap_size,
+            config.heap_trace,
+        )

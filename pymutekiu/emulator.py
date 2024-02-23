@@ -1,6 +1,7 @@
 from typing import (
     Optional,
     Any,
+    TYPE_CHECKING,
 )
 
 import pathlib
@@ -39,6 +40,9 @@ from .hle.states import OSStates
 from .hle.threading import YieldReason
 from .hle.syscall import SyscallHandler
 
+if TYPE_CHECKING:
+    from argparse import Namespace
+
 
 _logger = logging.getLogger('emulator')
 
@@ -46,26 +50,17 @@ _logger = logging.getLogger('emulator')
 class Process:
     _uc: Uc
     _states: OSStates
-    _main_stack_size: int
-    _heap_size: int
 
     STACK_BASE = 0xff000000
     MAGIC_EXIT = 0xfffffffc
     MAGIC_EXIT_THREAD = 0xfffffff8
 
-    def __init__(self, main_applet_path: str | pathlib.Path, main_stack_size=0x8000, heap_size=0x2000000):
+    def __init__(self,
+                 main_applet_path: str | pathlib.Path,
+                 config: 'Namespace'):
         self._uc = Uc(UC_ARCH_ARM, UC_MODE_ARM)
         self._uc.ctl_set_cpu_model(UC_CPU_ARM_926)
-        self._states = OSStates(self._uc, main_applet_path)
-
-        if main_stack_size % 4096 != 0:
-            _logger.warning('Main stack size is not a multiple of minimum page size.')
-            main_stack_size = utils.align(main_stack_size, 4096)
-        if heap_size % 4096 != 0:
-            _logger.warning('Heap size is not a multiple of minimum page size.')
-            heap_size = utils.align(heap_size, 4096)
-        self._main_stack_size = main_stack_size
-        self._heap_size = heap_size
+        self._states = OSStates(self._uc, main_applet_path, config)
 
         self._syscall_handler = SyscallHandler(self._uc, self._states)
 
@@ -123,7 +118,7 @@ class Process:
     def run(self):
         self._states.sched.new_thread(
             self._states.loader.entry_point,
-            stack_size=self._main_stack_size,
+            stack_size=self._states.config.stack_size,
         )
         # TODO setup exception handler
         #self._uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED, self._panic)
