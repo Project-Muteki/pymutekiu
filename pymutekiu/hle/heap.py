@@ -107,6 +107,11 @@ class Heap:
 
         alloc_unit = min(self._min_alloc_unit, self.free_pages)
 
+        if self._trace:
+            _logger.debug('growing heap %d -> %d',
+                          self.committed_pages,
+                          self.committed_pages + alloc_unit)
+
         self._uc.mem_map(self._heap_end, alloc_unit, UC_PROT_READ | UC_PROT_WRITE)
 
         new_heap_end = self._heap_end + alloc_unit
@@ -223,6 +228,8 @@ class Heap:
         :param size: Size of memory.
         :return: Guest pointer to allocated memory.
         """
+        if self._trace:
+            _logger.debug('requesting %d bytes on heap', size)
         actual_size = utils.align(size, 4)
         for allocated in self._find_chunk(actual_size):
             if allocated is None:
@@ -230,6 +237,8 @@ class Heap:
                 self._grow()
             else:
                 # Allocated.
+                if self._trace:
+                    _logger.debug('memory allocated @ %#010x', allocated)
                 return allocated
         raise RuntimeError('_find_chunk terminates unexpectedly.')
 
@@ -276,6 +285,9 @@ class Heap:
         Free a previously allocated guest memory and merge adjacent free chunks.
         :param addr: Guest pointer to allocated memory
         """
+        if self._trace:
+            _logger.debug('freeing memory @ %#010x', addr)
+
         chunk_addr = addr - 8
         header = self._read_and_parse_chunk(chunk_addr)
         prev_chunk = self._read_and_parse_chunk(header.prev_chunk) if header.prev_chunk != 0 else None

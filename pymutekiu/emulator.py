@@ -93,24 +93,27 @@ class Process:
         self._uc.emu_stop()
 
     def _on_intr(self, _uc: Uc, vec: int, _user_data: Any):
-        if vec == 2: # SVC
+        if vec == 2:  # SVC
             self._states.sched.yield_from_svc()
+        else:
+            _logger.error('Unhandled CPU exception type %d', vec)
 
     def _emulator_loop(self):
         while True:
             self._states.sched.tick()
-            match self._states.sched.yield_reason:
-                case YieldReason.NO_THREAD:
-                    _logger.debug('Applet exited. Quitting...')
-                    break
-                case YieldReason.REQUEST_SYSCALL:
-                    cr = self._syscall_handler.process_requests(self._states.sched.yield_request_num)
-                    if cr is not None:
-                        task = self._states.sched.run_coroutine(cr)
-                        # Propagate exception
-                        if task.done():
-                            task.result()
-                # TODO add handler for HLE callbacks
+            if self._states.sched.yield_reason & YieldReason.REQUEST_SYSCALL:
+                cr = self._syscall_handler.process_requests(self._states.sched.yield_request_num)
+                if cr is not None:
+                    task = self._states.sched.run_coroutine(cr)
+                    # Propagate exception
+                    # TODO do we log and continue instead of breaking the loop at least for some of them?
+                    if task.done():
+                        task.result()
+            if self._states.sched.yield_reason & YieldReason.NO_THREAD:
+                _logger.debug('Applet exited. Quitting...')
+                break
+
+            # TODO add handler for HLE callbacks
 
     def load(self, image_file: str | pathlib.Path) -> None:
         self._states.loader.load(image_file)

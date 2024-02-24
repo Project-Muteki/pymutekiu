@@ -1,7 +1,8 @@
-import math
 from typing import cast
+import math
 import unittest
 import unittest.mock as mock
+import os
 import struct
 
 from unicorn import (
@@ -10,8 +11,10 @@ from unicorn import (
     UC_ARCH_ARM,
     UC_MODE_ARM,
     UC_PROT_READ,
+    UC_PROT_WRITE,
     UC_PROT_EXEC,
     UC_PROT_NONE,
+    UC_QUERY_TIMEOUT,
     UC_HOOK_MEM_FETCH_PROT,
     UC_HOOK_INTR,
     UC_ERR_FETCH_PROT,
@@ -23,6 +26,7 @@ from unicorn.arm_const import (
     UC_ARM_REG_R1,
     UC_ARM_REG_LR,
     UC_ARM_REG_PC,
+    UC_ARM_REG_SP,
 )
 
 from keystone import (
@@ -31,8 +35,13 @@ from keystone import (
     KS_MODE_ARM,
 )
 
+from pymutekiu.utils import align
 
-@unittest.skip('Skipping experiments.')
+_RUN_EXPERIMENTS = os.getenv('RUN_EXPERIMENTS', 'no') == 'yes'
+
+
+@unittest.skipUnless(_RUN_EXPERIMENTS, 'Skipping experiments. Use the environment variable RUN_EXPERIMENTS to '
+                                       'activate.')
 class Experiments(unittest.TestCase):
     """
     Various experiments on Unicorn states after hooks.
@@ -135,3 +144,51 @@ class Experiments(unittest.TestCase):
             ret = self._uc.reg_read(UC_ARM_REG_R1)
             result.append(int.from_bytes(ret.to_bytes(4, 'little'), 'little', signed=True))
         self.assertListEqual(result, [(64 - i) // 16 + 1 if i < 64 else (64 - i + 15) // 16 + 1 for i in range(65536)])
+
+    def test_svc_stop_intermittent_failure(self):
+        actual_syscall_no = None
+        def on_intr(uc: Uc, intno: int, _user_data) -> None:
+            nonlocal actual_syscall_no
+            if intno == 2:
+                svc_offset = self._uc.reg_read(UC_ARM_REG_PC) - 4
+                syscall_no = int.from_bytes(self._uc.mem_read(svc_offset, 4), 'little') & 0xffffff
+
+                # Recover from syscall state to prepare for returning
+                sp = self._uc.reg_read(UC_ARM_REG_SP)
+                lr = int.from_bytes(self._uc.mem_read(sp, 4), 'little')
+                r0 = int.from_bytes(self._uc.mem_read(sp + 4, 4), 'little')
+                self._uc.reg_write(UC_ARM_REG_SP, sp + 8)
+                self._uc.reg_write(UC_ARM_REG_LR, lr)
+                self._uc.reg_write(UC_ARM_REG_R0, r0)
+
+                actual_syscall_no = syscall_no
+                self._uc.emu_stop()
+
+        code_page = 0x10000000
+        stack_page = 0x20000000
+
+        asm = ';'.join(f'push {{r0}};push {{lr}};svc {i + 0x10000:#x}' for i in range(65536))
+
+        code, ninst = self._ks.asm(
+            asm,
+            code_page,
+            as_bytes=True,
+        )
+
+        self._uc.mem_map(code_page, align(len(code), 4096), UC_PROT_READ | UC_PROT_EXEC)
+        self._uc.mem_map(stack_page, 4096, UC_PROT_READ | UC_PROT_WRITE)
+
+        self._uc.mem_write(code_page, code)
+        self._uc.hook_add(UC_HOOK_INTR, on_intr)
+
+        self._uc.reg_write(UC_ARM_REG_PC, code_page)
+        self._uc.reg_write(UC_ARM_REG_SP, stack_page + 4096)
+        for expected_syscall_no in range(0x10000, 0x10000+65536):
+            while True:
+                self._uc.emu_start(self._uc.reg_read(UC_ARM_REG_PC), 0, count=ninst, timeout=100)
+                print(self._uc.query(UC_QUERY_TIMEOUT))
+                if self._uc.query(UC_QUERY_TIMEOUT) == 1:
+                    continue
+                break
+
+            self.assertEqual(actual_syscall_no, expected_syscall_no)

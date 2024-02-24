@@ -27,6 +27,8 @@ from unicorn.arm_const import (
     UC_ARM_REG_R2,
     UC_ARM_REG_R3,
     UC_ARM_REG_SP,
+    UC_ARM_REG_LR,
+    UC_ARM_REG_PC,
 )
 
 if TYPE_CHECKING:
@@ -291,6 +293,8 @@ class GuestRequestHandler[_TKey]:
             _logger_req.debug('%s', self.request_key_to_str(req_key))
             return module.process(req_key)
         _logger_req.error('Unhandled guest request %s', self.request_key_to_str(req_key))
+        # Exit the function call state
+        self._uc.reg_write(UC_ARM_REG_PC, self._uc.reg_read(UC_ARM_REG_LR))
         return
 
     def register_guest_module(self, module: GuestModule[_TKey]) -> int:
@@ -316,7 +320,7 @@ def align(pos: int, blksize: int) -> int:
     Align memory address to the right side.
     :param pos: Memory address.
     :param blksize: Memory block size.
-    :return: pos if pos is already aligned to blksize, pos+blksize otherwise.
+    :return: pos if pos is already aligned to blksize, lalign(pos)+blksize otherwise.
     """
     return (pos // blksize * blksize) + (blksize if pos % blksize != 0 else 0)
 

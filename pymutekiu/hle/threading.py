@@ -296,10 +296,12 @@ class MaskTable:
         return (first_y << self._xshift) | first_x
 
 
-class YieldReason(enum.Enum):
+class YieldReason(enum.Flag):
     """
     Reason of thread yield.
     """
+    NONE = 0
+    "Nothing."
     TIMEOUT = enum.auto()
     "Scheduler timeout. A reschedule will happen automatically."
     REQUEST_SYSCALL = enum.auto()
@@ -436,7 +438,7 @@ class Scheduler:
     _masks: MaskTable
     _desc_head: Optional[int]
     _desc_tail: Optional[int]
-    _yield_reason: Optional[YieldReason]
+    _yield_reason: YieldReason
     _yield_request_num: Optional[int]
     _pending_handlers: dict[int, SchedulerCoroutineTask]
 
@@ -457,7 +459,7 @@ class Scheduler:
         self._desc_head = None
         self._desc_tail = None
 
-        self._yield_reason = None
+        self._yield_reason = YieldReason.NONE
         self._yield_request_num = None
 
         self._pending_handlers = {}
@@ -811,6 +813,8 @@ class Scheduler:
         self._uc.reg_write(UC_ARM_REG_LR, lr)
         self._uc.reg_write(UC_ARM_REG_R0, r0)
 
+        _logger.debug('syscall triggered from %#010x', lr)
+
         self._yield_reason = YieldReason.REQUEST_SYSCALL
         self._yield_request_num = syscall_no
         self._uc.emu_stop()
@@ -1018,6 +1022,8 @@ class Scheduler:
             self._yield_reason = YieldReason.NO_THREAD
             return
 
+        self._yield_reason = YieldReason.NONE
+
         # Run housekeeping
         self._sched_tick_intr()
 
@@ -1029,7 +1035,6 @@ class Scheduler:
         remaining_time = self.JIFFY_TARGET_US - (time.monotonic_ns() - self._sched_tick_starts_at) // 1000
 
         if remaining_time > 0:
-            self._yield_reason = None
             if idling:
                 # No tasks to run. Idling until timeout.
                 time.sleep(remaining_time / 1_000_000)
@@ -1045,7 +1050,9 @@ class Scheduler:
 
         # Check reason of yield. If it's timeout (idling, syscall taking too long or emulator times out), start a new
         # scheduler tick
+        # Note that Unicorn sometimes sets UC_QUERY_TIMEOUT when it's borderline timing out, so the timeout here
+        # needs to coexist with e.g. syscall.
         if idling or remaining_time <= 0 or self._uc.query(UC_QUERY_TIMEOUT) == 1:
-            self._yield_reason = YieldReason.TIMEOUT
+            self._yield_reason |= YieldReason.TIMEOUT
             self._sched_tick_fired = True
             self._sched_tick_starts_at = time.monotonic_ns()
