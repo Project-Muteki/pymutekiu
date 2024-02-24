@@ -18,6 +18,7 @@ from unicorn import (
     UC_HOOK_MEM_FETCH_PROT,
     UC_HOOK_INTR,
     UC_ERR_FETCH_PROT,
+    UC_ERR_FETCH_UNMAPPED,
 )
 from unicorn.arm_const import (
     UC_CPU_ARM_926,
@@ -145,7 +146,11 @@ class Experiments(unittest.TestCase):
             result.append(int.from_bytes(ret.to_bytes(4, 'little'), 'little', signed=True))
         self.assertListEqual(result, [(64 - i) // 16 + 1 if i < 64 else (64 - i + 15) // 16 + 1 for i in range(65536)])
 
+    @unittest.skip('This is very slow and will fail. Putting here solely for documentation purposes.')
     def test_svc_stop_intermittent_failure(self):
+        """
+        Try to trigger the failure in pymutekiu#5.
+        """
         actual_syscall_no = None
         def on_intr(uc: Uc, intno: int, _user_data) -> None:
             nonlocal actual_syscall_no
@@ -192,3 +197,20 @@ class Experiments(unittest.TestCase):
                 break
 
             self.assertEqual(actual_syscall_no, expected_syscall_no)
+
+    def test_return_to_null(self):
+        code_page = 0x10000000
+
+        code, ninst = self._ks.asm(
+            'bx lr',
+            code_page,
+            as_bytes=True,
+        )
+
+        self._uc.mem_map(code_page, 4096, UC_PROT_READ | UC_PROT_EXEC)
+        self._uc.mem_write(code_page, code)
+
+        self._uc.reg_write(UC_ARM_REG_LR, 0)
+        with self.assertRaises(UcError) as cm:
+            self._uc.emu_start(self._uc.reg_read(UC_ARM_REG_PC), 0x100000000)
+        self.assertEqual(cm.exception.errno, UC_ERR_FETCH_UNMAPPED)

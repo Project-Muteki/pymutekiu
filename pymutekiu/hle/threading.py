@@ -1046,7 +1046,7 @@ class Scheduler:
                 self._yield_reason = YieldReason.REQUEST_HANDLER_EVENT
             else:
                 # Run emulator for up to the determined time remaining.
-                self._uc.emu_start(self._uc.reg_read(UC_ARM_REG_PC), 0, timeout=remaining_time)
+                self._uc.emu_start(self._uc.reg_read(UC_ARM_REG_PC), 0x100000000, timeout=remaining_time)
 
         # Check reason of yield. If it's timeout (idling, syscall taking too long or emulator times out), start a new
         # scheduler tick
