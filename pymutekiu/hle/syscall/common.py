@@ -40,6 +40,12 @@ syscalldef = SyscallDefinition
 
 
 class SyscallModule:
+    """
+    GuestModule-compatible syscall handler.
+
+    Handler methods created using the decorator by @syscalldef(...) will be automatically indexed by the constructor and
+    converted to a GuestCallback.
+    """
     _uc: 'Uc'
     _states: 'OSStates'
     _table: dict[int, GuestCallback]
@@ -58,9 +64,15 @@ class SyscallModule:
 
     @property
     def available_keys(self) -> set[int]:
+        """All keys supported by this module."""
         return set(self._table)
 
     def process(self, key: int) -> 'Optional[RespondToCoroutine]':
+        """
+        Look up a certain request by key and create a coroutine for the found handler.
+        :param key: Key that corresponds to the handler.
+        :return: A GuestCallback coroutine object instantiated from the handler, or None if the handler does not exist.
+        """
         callback = self._table.get(key)
         if callback is None:
             return

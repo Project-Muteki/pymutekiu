@@ -237,6 +237,10 @@ class GuestCallback:
     async def respond_to(self, uc: 'Uc') -> None:
         """
         Respond to a Unicorn context requesting a callback.
+
+        For a sync handler, the coroutine shall write the handler return value to Unicorn and return immediately when
+        this method gets awaited. For an async handler, that handler will be awaited by this method for return before
+        writing that return value to Unicorn.
         :param uc: The Unicorn context.
         """
         reader = OABIArgReader(uc, self.arg_types)
@@ -264,12 +268,27 @@ class GuestCallback:
 _TKey = TypeVar('_TKey', bound=Hashable)
 
 
-class GuestModule(Protocol[_TKey]):
+class GuestModule[_TKey](Protocol):
+    """
+    Protocol for guest request handler module objects.
+
+    Implementation should provide available request keys to GuestRequestHandler-alike and generate coroutines for each
+    found request handler.
+
+    It's also up to the implementation to decide how to index handlers and do handler look up.
+    """
     @property
     def available_keys(self) -> set[_TKey]:
+        """All keys supported by this module."""
         return set()
 
-    def process(self, key: _TKey) -> Optional[RespondToCoroutine]: ...
+    def process(self, key: _TKey) -> Optional[RespondToCoroutine]:
+        """
+        Look up a certain request by key and create a coroutine for the found handler.
+        :param key: Key that corresponds to the handler.
+        :return: A coroutine object instantiated from the handler, or None if the handler does not exist.
+        """
+        ...
 
 
 class GuestRequestHandler[_TKey]:
@@ -284,7 +303,7 @@ class GuestRequestHandler[_TKey]:
         self._table = {}
         self._modules = []
 
-    def request_key_to_str(self, req_key: _TKey):
+    def request_key_to_str(self, req_key: _TKey) -> str:
         return str(req_key)
 
     def process_requests(self, req_key: _TKey) -> Optional[RespondToCoroutine]:
