@@ -17,6 +17,10 @@ from unicorn import (
     UC_QUERY_TIMEOUT,
     UC_HOOK_MEM_FETCH_PROT,
     UC_HOOK_INTR,
+    UC_HOOK_MEM_READ,
+    UC_HOOK_MEM_WRITE,
+    UC_HOOK_CODE,
+    UC_HOOK_MEM_FETCH,
     UC_ERR_FETCH_PROT,
     UC_ERR_FETCH_UNMAPPED,
 )
@@ -146,7 +150,6 @@ class Experiments(unittest.TestCase):
             result.append(int.from_bytes(ret.to_bytes(4, 'little'), 'little', signed=True))
         self.assertListEqual(result, [(64 - i) // 16 + 1 if i < 64 else (64 - i + 15) // 16 + 1 for i in range(65536)])
 
-    @unittest.skip('This is very slow and will fail. Putting here solely for documentation purposes.')
     def test_svc_stop_intermittent_failure(self):
         """
         Try to trigger the failure in pymutekiu#5.
@@ -214,3 +217,120 @@ class Experiments(unittest.TestCase):
         with self.assertRaises(UcError) as cm:
             self._uc.emu_start(self._uc.reg_read(UC_ARM_REG_PC), 0x100000000)
         self.assertEqual(cm.exception.errno, UC_ERR_FETCH_UNMAPPED)
+
+    def test_handler_nested(self):
+        def on_fetch_prot(uc: Uc, access_type: int, addr: int, size: int, value: int, user_data) -> bool:
+            print(user_data)
+            return False
+
+        self._uc.hook_add(
+            UC_HOOK_MEM_FETCH_PROT,
+            on_fetch_prot,
+            'narrow callback',
+            0x10000000,
+            0x10000fff,
+        )
+        self._uc.hook_add(
+            UC_HOOK_MEM_FETCH_PROT,
+            on_fetch_prot,
+            'broad callback',
+            1,
+            0,
+        )
+
+        self._uc.mem_map(0x10000000, 4096, UC_PROT_NONE)
+        with self.assertRaises(UcError) as cm:
+            self._uc.emu_start(0x10000000, 0)
+
+    def test_handler_nested_soft(self):
+        def on_fetch_prot(uc: Uc, access_type: int, addr: int, size: int, value: int, user_data) -> bool:
+            print(user_data)
+            uc.emu_stop()
+            return False
+
+        def on_fetch_prot_soft(uc: Uc, access_type: int, addr: int, size: int, value: int, user_data) -> None:
+            print(user_data)
+            uc.emu_stop()
+
+        code_page = 0x10000000
+
+        code, ninst = self._ks.asm(
+            'add r0, r0, 0;test: b test',
+            code_page,
+            as_bytes=True,
+        )
+
+        self._uc.mem_map(0x10000000, 4096, UC_PROT_NONE)
+        self._uc.mem_write(0x10000000, code)
+
+        self._uc.hook_add(
+            UC_HOOK_MEM_FETCH_PROT,
+            on_fetch_prot,
+            'broad callback',
+            1,
+            0,
+        )
+        self._uc.hook_add(
+            UC_HOOK_MEM_FETCH,
+            on_fetch_prot_soft,
+            'narrow callback',
+            0x10000000,
+            0x10000fff,
+        )
+
+        self._uc.emu_start(0x10000000, 0, timeout=1000000)
+        self.assertEqual(self._uc.query(UC_QUERY_TIMEOUT), 0, 'Unicorn timeout.')
+
+    def test_handler_soft(self):
+        def on_fetch_soft(uc: Uc, access_type: int, addr: int, size: int, value: int, user_data) -> None:
+            print(user_data)
+            uc.emu_stop()
+
+        code_page = 0x10000000
+
+        code, ninst = self._ks.asm(
+            'add r0, r0, 0;test: b test',
+            code_page,
+            as_bytes=True,
+        )
+
+        self._uc.mem_map(0x10000000, 4096, UC_PROT_READ | UC_PROT_EXEC)
+        self._uc.mem_write(0x10000000, code)
+
+        self._uc.hook_add(
+            UC_HOOK_MEM_FETCH,
+            on_fetch_soft,
+            'on_fetch_soft fired',
+            0x10000000,
+            0x10000fff,
+        )
+
+        self._uc.emu_start(0x10000000, 0, timeout=1000000)
+        self.assertEqual(self._uc.query(UC_QUERY_TIMEOUT), 0, 'Unicorn timeout.')
+
+    def test_handler_soft_2(self):
+        def on_code(uc: Uc, addr: int, size: int, user_data) -> None:
+            print(user_data)
+            uc.emu_stop()
+
+        code_page = 0x10000000
+
+        code, ninst = self._ks.asm(
+            'add r0, r0, 0;test: b test',
+            code_page,
+            as_bytes=True,
+        )
+
+        self._uc.mem_map(0x10000000, 4096, UC_PROT_EXEC)
+        self._uc.mem_write(0x10000000, code)
+
+        self._uc.hook_add(
+            UC_HOOK_CODE,
+            on_code,
+            'on_code fired',
+            0x10000000,
+            0x10000fff,
+        )
+
+        self._uc.emu_start(0x10000000, 0, timeout=1000000)
+        self.assertEqual(self._uc.query(UC_QUERY_TIMEOUT), 0, 'Unicorn timeout.')

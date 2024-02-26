@@ -798,7 +798,7 @@ class Scheduler:
 
         return True
 
-    def yield_from_svc(self):
+    def yield_from_svc(self) -> None:
         """
         Trigger a yield due to incoming SVC call.
         """
@@ -817,6 +817,11 @@ class Scheduler:
 
         self._yield_reason = YieldReason.REQUEST_SYSCALL
         self._yield_request_num = syscall_no
+        self._uc.emu_stop()
+
+    def yield_from_hle_func(self, addr: int) -> None:
+        self._yield_reason = YieldReason.REQUEST_HLE_FUNC
+        self._yield_request_num = addr
         self._uc.emu_stop()
 
     def request_sleep(self, jiffies: int) -> None:

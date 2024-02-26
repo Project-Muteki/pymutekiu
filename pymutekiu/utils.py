@@ -319,7 +319,7 @@ class GuestRequestHandler[_TKey]:
     def register_guest_module(self, module: GuestModule[_TKey]) -> int:
         conflicting_keys = module.available_keys.intersection(self._table)
         if len(conflicting_keys) != 0:
-            raise ValueError(f'Conflicting keys {repr(conflicting_keys)} present in module. Cannot register.')
+            raise TypeError(f'Conflicting keys {repr(conflicting_keys)} present in module. Cannot register.')
 
         self._modules.append(module)
         for key in module.available_keys:

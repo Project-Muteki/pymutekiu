@@ -13,6 +13,8 @@ from unicorn import (
     UC_ARCH_ARM,
     UC_MODE_ARM,
     UC_HOOK_INTR,
+    UC_HOOK_CODE,
+    UC_PROT_EXEC,
 )
 
 from unicorn.arm_const import (
@@ -51,9 +53,8 @@ class Process:
     _uc: Uc
     _states: OSStates
 
-    STACK_BASE = 0xff000000
-    MAGIC_EXIT = 0xfffffffc
-    MAGIC_EXIT_THREAD = 0xfffffff8
+    MAGIC_BASE = 0x100000000 - 0x1000
+    MAGIC_THREAD_EXIT = MAGIC_BASE
 
     def __init__(self,
                  main_applet_path: str | pathlib.Path,
@@ -63,6 +64,8 @@ class Process:
         self._states = OSStates(self._uc, main_applet_path, config)
 
         self._syscall_handler = SyscallHandler(self._uc, self._states)
+        # TODO HLE function handler here
+        # self._hle_func_handler = ...
 
     def _trace_code(self, _uc: Uc, addr: int, size: int, _user_data: Any):
         _logger.debug('insn @ %#010x width %#x', addr, size)
@@ -92,11 +95,14 @@ class Process:
         _logger.exception('PANIC: Emulator crashed')
         self._uc.emu_stop()
 
-    def _on_intr(self, _uc: Uc, vec: int, _user_data: Any):
+    def _on_intr(self, _uc: Uc, vec: int, _user_data: Any) -> None:
         if vec == 2:  # SVC
             self._states.sched.yield_from_svc()
         else:
             _logger.error('Unhandled CPU exception type %d', vec)
+
+    def _on_code_magic_func(self, _uc: Uc, addr: int, _size: int, _user_data: Any) -> None:
+        self._states.sched.yield_from_hle_func(addr)
 
     def _emulator_loop(self):
         while True:
@@ -119,15 +125,22 @@ class Process:
         self._states.loader.load(image_file)
 
     def run(self):
+        # Create main thread
         self._states.sched.new_thread(
             self._states.loader.entry_point,
             stack_size=self._states.config.stack_size,
         )
+
+        # Setup magic functions
+        self._uc.mem_map(self.MAGIC_BASE, 4096, UC_PROT_EXEC)
+        # TODO register magic exit module with the HLE function handler here
+
         # TODO setup exception handler
         #self._uc.hook_add(UC_HOOK_MEM_READ_UNMAPPED, self._panic)
         #self._uc.hook_add(UC_HOOK_MEM_FETCH_PROT, self._panic)
         #self._uc.hook_add(UC_HOOK_CODE, self._trace_code)
         self._uc.hook_add(UC_HOOK_INTR, self._on_intr)
+        self._uc.hook_add(UC_HOOK_CODE, self._on_code_magic_func)
 
         for region_start, region_end, perm in self._uc.mem_regions():
             _logger.debug('%#010x-%#010x %s', region_start, region_end, utils.uc_perm_to_str(perm))
