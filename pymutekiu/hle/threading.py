@@ -413,8 +413,6 @@ class Scheduler:
     RTOS kernel is basically a modified uC/OS-II kernel with some differences in availability of synchronization
     primitives, ABI and API signatures.
     """
-    JIFFY_TARGET_US = 1000
-
     STACK_BASE = 0xff000000
     STACK_LIMIT = 8*1024*1024
     STACK_GUARD_SIZE = 4096
@@ -429,6 +427,8 @@ class Scheduler:
 
     _uc: Uc
     _states: 'OSStates'
+    _jiffy_target_us: int
+    _sleep_counter_steps: int
     _stack_page_allocator: utils.MemPageTracker
     _stack_page_map: dict[int, int]
     _sched_tick_starts_at: int
@@ -442,9 +442,24 @@ class Scheduler:
     _yield_request_num: Optional[int]
     _pending_handlers: dict[int, SchedulerCoroutineTask]
 
-    def __init__(self, uc: Uc, states: 'OSStates'):
+    def __init__(self, uc: Uc, states: 'OSStates', hz: float = 1000):
+        """
+        Create the scheduler instance.
+        :param uc: Unicorn context.
+        :param states: OS state manager.
+        :param hz: A value between 1 and 1000 (double inclusive) that roughly represents how many scheduler ticks should
+        be generated per second. Smaller value makes the emulator perform faster and more efficiently on heavy compute
+        workloads while sacrificing timer (i.e. sleep) precision and, in some case, guest program responsiveness.
+        The default is 1000Hz since this aligns with our current observation on Besta RTOS scheduler behavior.
+        """
         self._uc = uc
         self._states = states
+
+        if hz < 1 or hz > 1000:
+            raise ValueError('Hz must be between 1 and 1000, double inclusive.')
+
+        self._jiffy_target_us = round(1 / hz * 1_000_000)
+        self._sleep_counter_steps = round(1000 / hz)
 
         self._stack_page_allocator = utils.MemPageTracker(self.STACK_LIMIT)
         self._stack_page_map = {}
@@ -995,7 +1010,7 @@ class Scheduler:
 
             # Update sleep counter
             if desc.wait_reason & ThreadWaitReason.SLEEP:
-                desc.sleep_counter -= 1
+                desc.sleep_counter -= self._sleep_counter_steps
                 if desc.sleep_counter <= 0:
                     desc.sleep_counter = 0
                     desc.wait_reason &= ~ThreadWaitReason.SLEEP
@@ -1037,7 +1052,7 @@ class Scheduler:
         idling = self._current_slot is None
 
         # Determine remaining time
-        remaining_time = self.JIFFY_TARGET_US - (time.monotonic_ns() - self._sched_tick_starts_at) // 1000
+        remaining_time = self._jiffy_target_us - (time.monotonic_ns() - self._sched_tick_starts_at) // 1000
 
         if remaining_time > 0:
             if idling:
