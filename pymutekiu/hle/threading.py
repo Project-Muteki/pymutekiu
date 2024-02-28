@@ -425,6 +425,10 @@ class Scheduler:
     SLOT_NORMAL_PRIO = range(HIGH_PRIO_CUTOFF, LOW_PRIO_CUTOFF)
     SLOT_LOW_PRIO = range(LOW_PRIO_CUTOFF, THREAD_TABLE_SIZE)
 
+    # TODO can we somehow provide these through the dynamic linking interface on the module?
+    MAGIC_BASE = 0x100000000 - 0x1000
+    MAGIC_THREAD_EXIT = MAGIC_BASE
+
     _uc: Uc
     _states: 'OSStates'
     _jiffy_target_us: int
@@ -556,7 +560,7 @@ class Scheduler:
         # Save initial CPU context to stack
         context_offset = stack_bottom - CPUContext.sizeof()
         # TODO define a magic exit for thread that calls OSExitThread and use it here
-        context = CPUContext.for_new_thread(func, user_data if user_data is not None else 0, 0)
+        context = CPUContext.for_new_thread(func, user_data if user_data is not None else 0, self.MAGIC_THREAD_EXIT)
         self._uc.mem_write(context_offset, context.to_bytes())
 
         # Allocate the thread descriptor on target heap.
@@ -987,6 +991,7 @@ class Scheduler:
         if task.tick():
             return task
         self._pending_handlers[self._current_slot] = task
+        return task
 
     def _sched_tick_intr(self):
         """
@@ -1062,6 +1067,7 @@ class Scheduler:
                 # Attempt to run a previous pending request handler
                 req_done = self._pending_handlers[self._current_slot].tick()
                 if req_done:
+                    self._pending_handlers[self._current_slot].result()
                     del self._pending_handlers[self._current_slot]
                 self._yield_reason = YieldReason.REQUEST_HANDLER_EVENT
             else:

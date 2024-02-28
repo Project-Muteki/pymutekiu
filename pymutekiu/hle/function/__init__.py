@@ -20,5 +20,5 @@ class HLEFunctionHandler(GuestRequestHandler[int]):
         if isinstance(module, HLEFunctionModule):
             sdef = module.get_definition(req_key)
             export_name = sdef.name if sdef.name is not None else f'#{sdef.ordinal}'
-            return f'<hlefunc {module.__name__} {export_name}>'
+            return f'<hlefunc {type(module).__name__} {export_name}>'
         return f'<hlefunc {req_key:#010x}>'

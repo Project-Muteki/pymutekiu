@@ -18,7 +18,7 @@ class Threading(SyscallModule):
 
     @syscalldef(0x10001, 'int', ['pointer', 'int'])
     def on_os_terminate_thread(self, thr: int, exit_code: int) -> int:
-        _logger.info('OSTerminateThread: Thread %08x exiting with code %d.', thr, exit_code)
+        _logger.info('OSTerminateThread: Thread %#010x exiting with code %d.', thr, exit_code)
         self._states.sched.delete_thread(thr)
         return 0
 
@@ -74,7 +74,7 @@ class Threading(SyscallModule):
     @syscalldef(0x10007, 'int', ['int'])
     def on_os_exit_thread(self, exit_code: int) -> int:
         thr = self._states.sched.current_thread
-        _logger.info('OSExitThread: Thread %08x exiting with code %d.', thr, exit_code)
+        _logger.info('OSExitThread: Thread %#010x exiting with code %d.', thr, exit_code)
         self._states.sched.delete_thread(thr)
         return 0
 

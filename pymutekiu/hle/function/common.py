@@ -8,7 +8,6 @@ from typing import (
 )
 
 from dataclasses import dataclass, field
-from functools import cached_property
 import copy
 import inspect
 import logging
@@ -133,7 +132,6 @@ class HLEFunctionModule:
     def base(self) -> int:
         return self._base
 
-    @cached_property
     def sizeof(self) -> int:
         return (max(self._ordinals) + 1) * 4
 
