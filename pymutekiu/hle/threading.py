@@ -889,20 +889,18 @@ class Scheduler:
 
         self.switch()
 
-    def sleep(self, jiffy: int) -> LiteFuture[None]:
+    async def sleep(self, jiffy: int) -> None:
         """
-        Block an async request handler for the amount of jiffy specified.
+        Scheduler coroutine that blocks an async request handler for the amount of `jiffy` specified.
 
         This method should be called from a guest request handler.
         :param jiffy: Number of jiffies to sleep.
-        :return: A `LiteFuture` instance that can be used with `await` in request handler coroutines
         """
-        fut: LiteFuture[None] = LiteFuture()
-
         # If requesting 0 jiffy, resolve and immediately return the future with no delay.
         if jiffy == 0:
-            fut.set_result(None)
-            return fut
+            return None
+
+        fut: LiteFuture[None] = LiteFuture()
 
         if self._current_slot in self._pending_handlers:
             _logger.warning(
@@ -915,7 +913,7 @@ class Scheduler:
         # Actually request for sleep
         self.request_sleep(jiffy)
 
-        return fut
+        return await fut
 
     def request_wakeup(self, thr: int):
         """
@@ -1004,7 +1002,7 @@ class Scheduler:
             self.write_thread_descriptor(thr, desc)
             self.switch()
 
-    def run_coroutine(self, cr: Coroutine[Any, Any, None]) -> SchedulerCoroutineTask:
+    def run_coroutine(self, cr: Coroutine[Any, Any, None] | Awaitable[None]) -> SchedulerCoroutineTask:
         """
         Inject a coroutine into the scheduler loop.
 
@@ -1072,7 +1070,7 @@ class Scheduler:
         This method should be periodically called in the main loop **before** the top level syscall/HLE callback
         handler.
         """
-        if self._current_slot is None and not any(self._pending_handlers):
+        if self._current_slot is None and not any(self._slots):
             self._yield_reason = YieldReason.NO_THREAD
             return
 
@@ -1087,7 +1085,6 @@ class Scheduler:
 
         # Determine remaining time
         remaining_time = self._jiffy_target_us - (time.monotonic_ns() - self._sched_tick_starts_at) // 1000
-
         if remaining_time > 0:
             if idling:
                 # No tasks to run. Idling until timeout.
