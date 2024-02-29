@@ -377,6 +377,62 @@ class SchedulerTestWithMock(unittest.TestCase):
         self.assertEqual(sched.yield_reason, YieldReason.REQUEST_SYSCALL, 'Wrong yield reason.')
         self.assertEqual(sched.yield_request_num, 0x10000, 'Wrong request number.')
 
+    def test_coroutine_runner_eager_exec(self):
+        """
+        Should immediately start running the coroutine after registering it with run_coroutine().
+        """
+        sched = Scheduler(self._uc, self._mock_states)
+
+        called = False
+
+        async def cr():
+            nonlocal called
+            called = True
+
+        # Scheduler tick start time is initialized to 0
+        thr = sched.new_thread(0xcafe0000)
+        sched.run_coroutine(cr())
+
+        self.assertTrue(called, 'Couroutine not immediately called.')
+
+    def test_sleep(self):
+        """
+        Should immediately start resolve syscall coroutines.
+        """
+        sched = Scheduler(self._uc, self._mock_states)
+
+        # Scheduler tick start time is initialized to 0
+        thr = sched.new_thread(0xcafe0000)
+        sched.run_coroutine(sched.sleep(1))
+
+        desc = sched.read_thread_descriptor(thr)
+        self.assertEqual(desc.wait_reason, ThreadWaitReason.SLEEP, 'Wrong wait reason.')
+        self.assertEqual(desc.sleep_counter, 1, 'Unexpected sleep counter value.')
+
+    @mock.patch('time.monotonic_ns')
+    def test_coroutine_resolution(self, timer_mock: mock.MagicMock):
+        """
+        Should immediately start resolve syscall coroutines.
+        :param timer_mock: Mock timer.
+        """
+        timer_mock.return_value = 0
+
+        sched = Scheduler(self._uc, self._mock_states)
+
+        async def cr():
+            await sched.sleep(1)
+
+        # Scheduler tick start time is initialized to 0
+        thr = sched.new_thread(0xcafe0000)
+        sched.run_coroutine(cr())
+
+        # Trigger the ticker interrupt emulation routine
+        timer_mock.return_value = 1_000_000
+        sched.tick()
+        desc = sched.read_thread_descriptor(thr)
+        self.assertEqual(desc.wait_reason, ThreadWaitReason.NONE, 'Wrong wait reason.')
+        self.assertEqual(desc.sleep_counter, 0, 'Unexpected sleep counter value.')
+
     def test_request_sleep(self):
         """
         Should put the thread to sleep.
@@ -437,6 +493,7 @@ class SchedulerTestWithMock(unittest.TestCase):
         desc = sched.read_thread_descriptor(thr)
         self.assertEqual(desc.wait_reason, ThreadWaitReason.NONE, 'Wrong wait reason.')
         self.assertEqual(sched.current_slot, desc.slot, 'Thread not scheduled.')
+
 
 class SchedulerWithRealHeap(unittest.TestCase):
     """
