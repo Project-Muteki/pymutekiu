@@ -314,10 +314,10 @@ class YieldReason(enum.Flag):
     "No thread registered."
 
 
-_ReturnT_co = TypeVar('_ReturnT_co', covariant=True)
+_ReturnT = TypeVar('_ReturnT')
 
 
-class LiteFuture(Awaitable[_ReturnT_co]):
+class LiteFuture[_ReturnT](Awaitable[_ReturnT]):
     """
     Future class for use with Scheduler. It loosely follows the API of asyncio.Future with some features such as
     callbacks missing.
@@ -326,7 +326,7 @@ class LiteFuture(Awaitable[_ReturnT_co]):
     _FINISHED = 1
     _CANCELLED = 2
 
-    _val: Optional[_ReturnT_co]
+    _val: Optional[_ReturnT]
     _exc: Optional[BaseException]
     _state: int
     _cancel_msg: Optional[str]
@@ -347,23 +347,23 @@ class LiteFuture(Awaitable[_ReturnT_co]):
     def cancelled(self) -> bool:
         return self._state == self._CANCELLED
 
-    def done(self):
+    def done(self) -> bool:
         return self._state != self._PENDING
 
-    def result(self) -> _ReturnT_co:
+    def result(self) -> _ReturnT:
         if self.cancelled():
             raise RuntimeError(self._cancel_msg)
         if self._exc is not None:
             raise self._exc
         return self._ret
 
-    def set_result(self, val: _ReturnT_co):
+    def set_result(self, val: _ReturnT) -> None:
         self._val = val
 
-    def set_exception(self, exc: BaseException):
+    def set_exception(self, exc: BaseException) -> None:
         self._exc = exc
 
-    def __await__(self) -> Generator['LiteFuture', None, _ReturnT_co]:
+    def __await__(self) -> Generator['LiteFuture[_ReturnT]', None, _ReturnT]:
         if not self.done():
             yield self
         # Check against unexpected await exits
@@ -534,7 +534,8 @@ class Scheduler:
         :param stack_size: Stack size in bytes. Must be page-aligned.
         :param defer_start: Set to True to not start the thread immediately.
         :param slot: Specify an unused slot number. The next available slot will be selected if this is unset.
-        :return:
+        :return: Guest pointer to allocated thread descriptor.
+        :raise GuestOSError(KERNEL, SYS_OUT_OF_MEMORY): Guest memory allocation failed.
         """
         # TODO more robust error handling (i.e. free already allocated resources before raising exceptions)
         if stack_size % 4096 != 0:
@@ -547,6 +548,7 @@ class Scheduler:
 
         # Allocate thread stack on target memory
         # Add extra 1 page as guard page. This page will be mapped as protected.
+        # TODO move these to its own class so we can easily do free-on-error.
         page_offset = self._stack_page_allocator.add(stack_size + self.STACK_GUARD_SIZE)
         stack_bottom = self.STACK_BASE - page_offset
         stack_top = stack_bottom - stack_size
@@ -559,12 +561,10 @@ class Scheduler:
 
         # Save initial CPU context to stack
         context_offset = stack_bottom - CPUContext.sizeof()
-        # TODO define a magic exit for thread that calls OSExitThread and use it here
         context = CPUContext.for_new_thread(func, user_data if user_data is not None else 0, self.MAGIC_THREAD_EXIT)
         self._uc.mem_write(context_offset, context.to_bytes())
 
         # Allocate the thread descriptor on target heap.
-        # TODO keep at least head and tail of all threads created
         thr_ptr = self._states.heap.malloc(ThreadDescriptor.sizeof())
         desc = ThreadDescriptor(
             thread_func_ptr=func,
@@ -595,6 +595,7 @@ class Scheduler:
         """
         Stop and delete a guest thread by its descriptor.
         :param addr: Guest pointer to the thread descriptor.
+        :raise GuestOSError(USER, THREADING_INVALID_DESCRIPTOR): Thread pointer is NULL or thread descriptor is invalid.
         """
         if addr == 0:
             raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
@@ -726,8 +727,12 @@ class Scheduler:
         """
         Set errno on current thread.
         :param errno: Error code.
+        :raise GuestOSError(USER, THREADING_INVALID_DESCRIPTOR): Scheduler is idling and no current running thread is
+        available.
         """
         thr = self.current_thread
+        if thr is None:
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
         desc = self.read_thread_descriptor(thr)
         desc.kerrno = errno
         self.write_thread_descriptor(thr, desc)
@@ -736,16 +741,30 @@ class Scheduler:
         """
         Get errno from current thread.
         :return: Error code
+        :raise GuestOSError(USER, THREADING_INVALID_DESCRIPTOR): Scheduler is idling and no current running thread is
+        available.
         """
-        desc = self.read_thread_descriptor(self.current_thread)
+        thr = self.current_thread
+        if thr is None:
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
+        desc = self.read_thread_descriptor(thr)
         return desc.kerrno
 
     def save_context(self, slot: Optional[int] = None) -> None:
         """
         Switch out from a thread by saving current context to it.
         :param slot: Force the slot number. Uses the current running slot when left unset.
+        :raise GuestOSError(USER, THREADING_INVALID_DESCRIPTOR): No thread is running, or `slot` is empty.
         """
-        thr = self.current_thread if slot is None else self._slots[slot]
+        thr: int
+        if slot is None:
+            if self.current_thread is None:
+                raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
+            thr = self.current_thread
+        else:
+            if self._slots[slot] is None:
+                raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
+            thr = self._slots[slot]
 
         # Read the current thread descriptor
         desc_from = self.read_thread_descriptor(thr)
@@ -763,8 +782,11 @@ class Scheduler:
         """
         Restore context from a thread descriptor registered to a specific slot.
         :param slot: Slot number.
+        :raise GuestOSError(USER, THREADING_INVALID_DESCRIPTOR): `slot` is empty.
         """
         # Read the target thread descriptor
+        if self._slots[slot] is None:
+            raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
         desc_to = self.read_thread_descriptor(self._slots[slot])
         assert desc_to.slot == slot
 
@@ -849,6 +871,7 @@ class Scheduler:
 
         This method should be called from a guest request handler.
         :param jiffies: Number of jiffies to sleep.
+        :raise RuntimeError: No thread is running.
         """
         if jiffies == 0:
             return
@@ -874,7 +897,7 @@ class Scheduler:
         :param jiffy: Number of jiffies to sleep.
         :return: A `LiteFuture` instance that can be used with `await` in request handler coroutines
         """
-        fut = LiteFuture()
+        fut: LiteFuture[None] = LiteFuture()
 
         # If requesting 0 jiffy, resolve and immediately return the future with no delay.
         if jiffy == 0:
@@ -886,6 +909,7 @@ class Scheduler:
                 'Some request handler already awaiting on slot %d. Rejecting before starting a new one...',
                 self._current_slot
             )
+            assert self._pending_handlers[self._current_slot].aw is not None
             self._pending_handlers[self._current_slot].aw.set_exception(RuntimeError('Dual await cancelled.'))
 
         # Actually request for sleep
@@ -899,6 +923,8 @@ class Scheduler:
 
         This method should be called from a guest request handler.
         :param thr: Guest pointer to a thread descriptor.
+        :raise GuestOSError(USER, THREADING_INVALID_DESCRIPTOR): Thread pointer is NULL or thread descriptor is invalid.
+        :raise GuestOSError(USER, THREADING_THREAD_NOT_SLEEPING): Attempting to awake an active thread.
         """
         if thr == 0:
             raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
@@ -923,6 +949,7 @@ class Scheduler:
 
         This method should be called from a guest request handler.
         :param thr: Guest pointer to a thread descriptor.
+        :raise GuestOSError(USER, THREADING_INVALID_DESCRIPTOR): Thread pointer is NULL or thread descriptor is invalid.
         """
         if thr == 0:
             raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
@@ -942,6 +969,7 @@ class Scheduler:
 
         This method should be called from a guest request handler.
         :param thr: Guest pointer to a thread descriptor.
+        :raise GuestOSError(USER, THREADING_INVALID_DESCRIPTOR): Thread pointer is NULL or thread descriptor is invalid.
         """
         if thr == 0:
             raise GuestOSError(ErrnoNamespace.USER, ErrnoCauseUser.THREADING_INVALID_DESCRIPTOR)
@@ -984,6 +1012,7 @@ class Scheduler:
         will be finished over time before the linked guest thread gets executed by the scheduler.
         :param cr: A scheduler coroutine. Must return None.
         :return: The task object corresponding to the coroutine.
+        :raise RuntimeError: No thread is running.
         """
         if self._current_slot is None:
             raise RuntimeError('No thread currently running.')

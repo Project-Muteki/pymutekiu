@@ -75,5 +75,5 @@ class SyscallModule:
         """
         callback = self._table.get(key)
         if callback is None:
-            return
+            return None
         return callback.respond_to(self._uc)
