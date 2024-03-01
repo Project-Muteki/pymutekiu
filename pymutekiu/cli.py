@@ -23,9 +23,9 @@ def parse_args() -> tuple[ArgumentParser, Namespace]:
     p.add_argument('-c', '--config', is_config_file=True,
                    help='Path to config file')
     p.add_argument('-ms', '--min-heap-unit', type=suffixed_int, default=2 * 1024 * 1024,
-                   help='Minimum heap allocation unit (Default: 2M)')
+                   help='Initial heap allocation size and heap allocation unit (Default: 2M)')
     p.add_argument('-mx', '--max-heap-size', type=suffixed_int, default=32 * 1024 * 1024,
-                   help='Minimum heap allocation unit (Default: 32M)')
+                   help='Maximum heap allocation size (Default: 32M)')
     p.add_argument('-ss', '--stack-size', type=suffixed_int, default=32 * 1024,
                    help='Size for main thread stack (Default: 32k)')
     p.add_argument('--heap-trace', action='store_true', default=False,
