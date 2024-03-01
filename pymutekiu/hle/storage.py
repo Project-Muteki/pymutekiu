@@ -264,7 +264,7 @@ class StorageManager:
         self._uc = uc
         self._states = states
         self.vfs = VFS(uc, states)
-        self.blkdev = BlockDeviceManager(uc,states)
+        self.blkdev = BlockDeviceManager(uc, states)
 
     def _rectify_id_or_letter(self, letter_or_id: str | int) -> str:
         if isinstance(letter_or_id, int):
@@ -285,10 +285,23 @@ class StorageManager:
         return letter
 
     def mount_directory(self, letter_or_id: str | int, path: str) -> None:
+        """
+        Mount a host OS directory into the guest OS.
+        :param letter_or_id: Guest drive letter or ID.
+        :param path: Path to a host directory.
+        """
         letter = self._check_drive_before_mount(letter_or_id)
         self.vfs.mount_drive(letter, path)
         # self.block_device.mount_os_block_device(letter, path)
         self._drives.add(letter)
+
+    def mount_memory_fs(self, letter_or_id: str | int) -> None:
+        """
+        Mount a MemoryFS into the guest OS as RAM disk.
+        :param letter_or_id: Guest drive letter or ID.
+        """
+        letter = self._check_drive_before_mount(letter_or_id)
+        self.vfs.mount_drive(letter, 'mem://')
 
     def unmount_drive(self, letter_or_id: str | int) -> None:
         letter = self._rectify_id_or_letter(letter_or_id)

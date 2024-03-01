@@ -334,6 +334,8 @@ class SchedulerTestWithMock(unittest.TestCase):
         thr = sched.new_thread(0xcafe0000)
         sched.set_errno(0x11223344)
         self.assertEqual(sched.get_errno(), 0x11223344)
+        desc = sched.read_thread_descriptor(thr)
+        self.assertEqual(desc.kerrno, 0x11223344)
 
     def test_yield_from_svc(self):
         """
@@ -390,7 +392,7 @@ class SchedulerTestWithMock(unittest.TestCase):
             called = True
 
         # Scheduler tick start time is initialized to 0
-        thr = sched.new_thread(0xcafe0000)
+        sched.new_thread(0xcafe0000)
         sched.run_coroutine(cr())
 
         self.assertTrue(called, 'Couroutine not immediately called.')

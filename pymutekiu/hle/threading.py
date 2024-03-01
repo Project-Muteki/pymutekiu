@@ -462,7 +462,7 @@ class Scheduler:
         if hz < 1 or hz > 1000:
             raise ValueError('Hz must be between 1 and 1000, double inclusive.')
 
-        self._jiffy_target_us = round(1 / hz * 1_000_000)
+        self._jiffy_target_us = round(1_000_000 / hz)
         self._sleep_counter_steps = round(1000 / hz)
 
         self._stack_page_allocator = utils.MemPageTracker(self.STACK_LIMIT)
