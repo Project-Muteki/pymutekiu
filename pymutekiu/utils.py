@@ -15,6 +15,7 @@ from typing import (
     cast,
 )
 from collections.abc import Iterator, Coroutine
+from itertools import pairwise
 
 import dataclasses
 import inspect
@@ -256,7 +257,10 @@ class GuestCallback:
 
         # Convert and write return value.
         if self.return_type != 'void':
-            # TODO handle composite type.
+            # Windows CE ABI doesn't support composite types directly. It will implicitly insert an arg0 with
+            # [in, out] type on the callee function, allocate the composite type locally on the caller stack
+            # frame, and pass the allocated memory to callee via arg0.
+            # See https://learn.microsoft.com/en-us/previous-versions/windows/embedded/ms881426(v=msdn.10)
             ret_regs = guest_type_to_regs(self.return_type, syscall_ret)
             uc.reg_write(UC_ARM_REG_R0, ret_regs[0])
             if len(ret_regs) >= 2:
@@ -419,12 +423,39 @@ def guest_type_to_regs(type_: ArgumentType, value: float | bool | None) -> tuple
         return value_reg & 0xffffffff, (value_reg >> 32) & 0xffffffff
 
 
+def read_nul_terminated_wstring(uc: 'Uc', str_p: int) -> str:
+    result: bytearray = bytearray()
+    while True:
+        s = uc.mem_read(str_p, 512)
+        it = iter(s)
+        for first, second in zip(it, it):
+            if first == 0 and second == 0:
+                break
+            result.append(first)
+            result.append(second)
+    return result.decode('utf-16le')
+
+
+def read_nul_terminated_string(uc: 'Uc', str_p: int) -> bytearray:
+    result: bytearray = bytearray()
+    while True:
+        s = uc.mem_read(str_p, 512)
+        for c in s:
+            if c == 0:
+                break
+            result.append(c)
+    return result
+
+
 class OABIArgReader:
     """
     Parse Arm OABI call arguments.
 
     APCS reference can be found here:
     https://developer.arm.com/documentation/dui0041/c/ARM-Procedure-Call-Standard/About-the-ARM-Procedure-Call-Standard
+
+    The Windows CE variant of the OABI can be found here:
+    https://learn.microsoft.com/en-us/previous-versions/windows/embedded/ms881418(v=msdn.10)
     """
     _uc: 'Uc'
     _fmt: FixedArgumentFormat
