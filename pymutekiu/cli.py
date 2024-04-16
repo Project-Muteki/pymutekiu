@@ -18,6 +18,13 @@ def suffixed_int(str_: str) -> int:
         return int(str_, 0)
 
 
+def resolution(str_: str) -> tuple[int, int]:
+    split = str_.split('x')
+    if len(split) != 2:
+        raise ValueError(f'Improperly formatted resolution {repr(str_)}')
+    return int(split[0]), int(split[1])
+
+
 def parse_args() -> tuple[ArgumentParser, Namespace]:
     p = ArgumentParser(default_config_files=['pymutekiu.conf'])
     p.add_argument('-c', '--config', is_config_file=True,
@@ -30,6 +37,8 @@ def parse_args() -> tuple[ArgumentParser, Namespace]:
                    help='Size for main thread stack (Default: 32k)')
     p.add_argument('--heap-trace', action='store_true', default=False,
                    help='Enable heap trace')
+    p.add_argument('-r', '--lcd-resolution', type=resolution, default=(320, 240),
+                   help='Main LCD resolution (Default: 320x240)')
     p.add_argument('exe', help='Path to executable file')
     return p, p.parse_args()
 

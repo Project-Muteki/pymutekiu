@@ -7,6 +7,8 @@ from typing import (
 import pathlib
 import logging
 
+import pygame
+
 from unicorn import (
     Uc,
     UcError,
@@ -108,6 +110,16 @@ class Process:
 
     def _emulator_loop(self):
         while True:
+            for pgevent in pygame.event.get():
+                if pgevent.type == pygame.QUIT:
+                    # TODO find a way to gracefully shutdown the scheduler
+                    break
+                elif pgevent.type == pygame.KEYDOWN:
+                    self._states.ui_input_tracker.on_pygame_keydown(pgevent.key)
+                elif pgevent.type == pygame.KEYUP:
+                    self._states.ui_input_tracker.on_pygame_keyup(pgevent.key)
+
+            self._states.ui_input_tracker.tick()
             self._states.sched.tick()
             if self._states.sched.yield_reason & YieldReason.REQUEST_SYSCALL:
                 cr = self._syscall_handler.process_requests(self._states.sched.yield_request_num)

@@ -5,6 +5,9 @@ import weakref
 from .threading import Scheduler
 from .loader import Loader
 from .heap import Heap
+from .ui.event import EventBroker, InputTracker
+
+import pygame
 
 if TYPE_CHECKING:
     from unicorn import Uc
@@ -23,6 +26,7 @@ class OSStates:
     sched: Scheduler
     loader: Loader
     heap: Heap
+    ui_event: EventBroker
 
     def __init__(self, uc: 'Uc', main_applet_path: 'str | Path', config: 'Namespace'):
         """
@@ -33,13 +37,13 @@ class OSStates:
         """
         self._uc = uc
         self.config = config
+
         # HACK: Cast away the ProxyType here. weakref.ProxyType[OSStates] for these components currently are typed
         # simply as OSStates because typing spec does not yet allow object wrapping.
         self.sched = Scheduler(self._uc, cast('OSStates', weakref.proxy(self)))
         self.loader = Loader(self._uc, cast('OSStates', weakref.proxy(self)))
         # Load main applet. Must be done before heap initialization.
         self.loader.load(main_applet_path)
-        # TODO allow user to change optional configs
         self.heap = Heap(
             self._uc,
             cast('OSStates', weakref.proxy(self)),
@@ -47,3 +51,9 @@ class OSStates:
             config.max_heap_size,
             config.heap_trace,
         )
+
+        pygame.init()
+        pygame.display.set_mode(config.lcd_resolution)
+
+        self.ui_event = EventBroker(self._uc, cast('OSStates', weakref.proxy(self)))
+        self.ui_input_tracker = InputTracker(self._uc, cast('OSStates', weakref.proxy(self)))
